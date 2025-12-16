@@ -1,98 +1,271 @@
+import Ionicons from '@expo/vector-icons/Ionicons';
 import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import { router } from 'expo-router';
+import { useEffect, useMemo, useState } from 'react';
+import {
+  ActivityIndicator,
+  FlatList,
+  Pressable,
+  RefreshControl,
+  StyleSheet,
+  Text,
+  TextInput,
+  View,
+  useColorScheme,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+import { Colors } from '@/constants/theme';
+import { useAuth } from '@/hooks/use-auth';
+import { useProfiles } from '@/hooks/use-profiles';
 
-export default function HomeScreen() {
+const FALLBACK_PHOTO =
+  'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=900&q=80';
+
+export default function CompactGridScreen() {
+  const colorScheme = useColorScheme();
+  const palette = Colors[colorScheme ?? 'light'];
+  const [search, setSearch] = useState('');
+  const { user } = useAuth();
+  const { data, loading, error, refresh, refreshing } = useProfiles();
+
+  const profiles = useMemo(() => {
+    const base = data;
+    if (!user?.uid) return base;
+    return base.filter((p) => p.id !== user.uid);
+  }, [data, user?.uid]);
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return profiles;
+    return profiles.filter((p) => p.name.toLowerCase().includes(term));
+  }, [profiles, search]);
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
-
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+    <SafeAreaView style={[styles.screen, { backgroundColor: palette.background }]} edges={['top']}>
+      <View style={[styles.header, { borderBottomColor: palette.border }]}>
+        <View style={styles.headerTop}>
+          <Text style={styles.brand}>chatIncontri</Text>
+          <Pressable
+            style={styles.profileBtn}
+            onPress={() => {
+              if (user?.uid) {
+                router.push(`/profile/${user.uid}`);
+              } else {
+                router.push('/profile/setup');
+              }
+            }}>
+            <Ionicons name="person-circle-outline" size={26} color={palette.text} />
+          </Pressable>
+        </View>
+        <View
+          style={[
+            styles.searchBox,
+            { borderColor: palette.border, backgroundColor: palette.card },
+          ]}>
+          <TextInput
+            placeholder="Cerca per nickname"
+            placeholderTextColor={palette.muted}
+            value={search}
+            onChangeText={setSearch}
+            style={styles.searchInput}
+          />
+        </View>
+      </View>
+      {loading ? (
+        <View style={styles.loading}>
+          <ActivityIndicator color={palette.tint} />
+          <Text style={styles.loadingText}>Carico profili...</Text>
+        </View>
+      ) : error ? (
+        <View style={styles.loading}>
+          <Text style={styles.loadingText}>Errore nel caricamento, uso dati fittizi.</Text>
+        </View>
+      ) : null}
+      <FlatList
+        data={filtered}
+        numColumns={3}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.listContent}
+        columnWrapperStyle={styles.row}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={refresh}
+            tintColor={palette.tint}
+            colors={[palette.tint]}
+          />
+        }
+        ListEmptyComponent={
+          !loading && !refreshing ? (
+            <View style={styles.emptyState}>
+              <Text style={styles.emptyTitle}>Nessun profilo disponibile</Text>
+              <Text style={[styles.emptySubtitle, { color: palette.muted }]}>
+                Aggiungi nuovi profili o aggiorna la pagina.
+              </Text>
+            </View>
+          ) : null
+        }
+        renderItem={({ item }) => {
+          const photoUri = (item as any).photo || (item as any).photos?.[0] || FALLBACK_PHOTO;
+          return (
+            <Pressable
+              style={[styles.card, { borderColor: palette.border }]}
+              onPress={() => router.push(`/profile/${item.id}`)}
+              android_ripple={{ color: '#00000010' }}>
+              <View style={styles.photoWrapper}>
+                <Image
+                  source={{ uri: photoUri }}
+                  style={styles.photo}
+                  contentFit="cover"
+                  transition={150}
+                  cachePolicy="memory-disk"
+                />
+                <View style={styles.photoOverlay} />
+                <View style={styles.photoFooter}>
+                  <Text style={styles.name} numberOfLines={1}>
+                    {item.name}, {item.age}
+                  </Text>
+                  <View style={styles.metaRow}>
+                    <Ionicons name="location" size={12} color="#f3f4f6" />
+                    <Text style={styles.meta} numberOfLines={1}>
+                      {item.city ?? ''}
+                    </Text>
+                  </View>
+                </View>
+              </View>
+            </Pressable>
+          );
+        }}
+      />
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  screen: {
+    flex: 1,
+  },
+  header: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 12,
+    gap: 12,
+    borderBottomWidth: 1,
+  },
+  headerTop: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  profileBtn: {
+    padding: 6,
+  },
+  brand: {
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 0.2,
+  },
+  loading: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
   },
-  stepContainer: {
+  loadingText: {
+    fontSize: 14,
+  },
+  searchBox: {
+    borderWidth: 1,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  searchInput: {
+    fontSize: 15,
+  },
+  loading: {
+    flexDirection: 'row',
+    alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 6,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
+  loadingText: {
+    fontSize: 14,
+  },
+  listContent: {
+    paddingHorizontal: 12,
+    paddingVertical: 16,
+    gap: 12,
+  },
+  row: {
+    gap: 12,
+    justifyContent: 'space-between',
+  },
+  card: {
+    flex: 1,
+    minWidth: 0,
+    borderRadius: 10,
+    borderWidth: 1,
+    backgroundColor: '#f9fafb',
+    shadowColor: '#000',
+    shadowOpacity: 0.05,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 8,
+    elevation: 2,
+    overflow: 'hidden',
+  },
+  photoWrapper: {
+    width: '100%',
+    aspectRatio: 1,
+    backgroundColor: '#e5e7eb',
+  },
+  photo: {
+    width: '100%',
+    height: '100%',
+  },
+  name: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  meta: {
+    color: '#f3f4f6',
+    fontSize: 10,
+  },
+  photoOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.25)',
+  },
+  photoFooter: {
     position: 'absolute',
+    left: 8,
+    right: 8,
+    bottom: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.35)',
+    gap: 4,
+  },
+  metaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  emptyState: {
+    paddingVertical: 40,
+    alignItems: 'center',
+    gap: 6,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  emptySubtitle: {
+    fontSize: 13,
+    textAlign: 'center',
   },
 });
