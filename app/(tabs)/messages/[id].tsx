@@ -1,5 +1,4 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { Audio } from 'expo-av';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -22,6 +21,7 @@ import {
   setDoc,
   Timestamp,
 } from 'firebase/firestore';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -154,7 +154,7 @@ const ParticleEffect = React.memo(({ visible, color }: { visible: boolean; color
 const FALLBACK_PHOTO = 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=900&q=80';
 const SECRET_EXPIRY_MS = 10_000;
 const INITIAL_MESSAGES_LIMIT = 30;
-const TRANSLATE_SOURCE_OPTIONS = ['auto', 'en', 'es', 'fr', 'de'];
+const OUTGOING_TARGET_OPTIONS = ['en', 'es', 'fr', 'de', 'it'];
 const TARGET_TRANSLATION_LANG = 'it';
 
 export default function ChatScreen() {
@@ -191,7 +191,7 @@ export default function ChatScreen() {
   const [secretMode, setSecretMode] = useState(false);
   const [translateAllEnabled, setTranslateAllEnabled] = useState(false);
   const [translatingAll, setTranslatingAll] = useState(false);
-  const [sourceLang, setSourceLang] = useState<string>('auto');
+  const [outgoingTargetLang, setOutgoingTargetLang] = useState<string>('en');
   const [translations, setTranslations] = useState<Record<string, string | null>>({});
   const [translatingMap, setTranslatingMap] = useState<Record<string, boolean>>({});
   const [fadingMap, setFadingMap] = useState<Record<string, boolean>>({});
@@ -418,13 +418,13 @@ export default function ChatScreen() {
   }, [chatId, user?.uid, messages, pendingMessages, chatMeta, initialLoadDone]);
 
   const translateText = useCallback(
-    async (message: ChatMessage, source: string) => {
+    async (message: ChatMessage) => {
       if (!message.text || !message.id) return;
       if (translatingMap[message.id]) return;
       setTranslatingMap((prev) => ({ ...prev, [message.id]: true }));
       try {
         const res = await fetch(
-          `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${source}&tl=${TARGET_TRANSLATION_LANG}&dt=t&q=${encodeURIComponent(
+          `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${TARGET_TRANSLATION_LANG}&dt=t&q=${encodeURIComponent(
             message.text
           )}`
         );
@@ -453,13 +453,13 @@ export default function ChatScreen() {
         for (const m of toTranslate) {
           // sequenziale per evitare rate limit
           // eslint-disable-next-line no-await-in-loop
-          await translateText(m, sourceLang);
+          await translateText(m);
         }
       } finally {
         setTranslatingAll(false);
       }
     },
-    [messages, pendingMessages, translations, translateText, sourceLang]
+    [messages, pendingMessages, translations, translateText]
   );
 
   useEffect(() => {
@@ -476,6 +476,24 @@ export default function ChatScreen() {
     translateAllMessages();
   }, [messages, translateAllEnabled, translations, translateAllMessages]);
 
+  const translateOutgoingText = useCallback(async (text: string, target: string) => {
+    try {
+      const res = await fetch(
+        `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${target}&dt=t&q=${encodeURIComponent(
+          text
+        )}`
+      );
+      const data = await res.json();
+      const translated =
+        Array.isArray(data) && Array.isArray(data[0])
+          ? data[0].map((part: any) => part[0]).join('')
+          : null;
+      return translated || null;
+    } catch (e) {
+      return null;
+    }
+  }, []);
+
   useFocusEffect(
     useCallback(() => {
       if (initialLoadDone) {
@@ -489,11 +507,18 @@ export default function ChatScreen() {
     if (!chatId || !user?.uid || !otherId) return;
     const trimmed = input.trim();
     if (!trimmed) return;
+    let textToSend = trimmed;
+    if (translateAllEnabled) {
+      const translated = await translateOutgoingText(trimmed, outgoingTargetLang);
+      if (translated) {
+        textToSend = translated;
+      }
+    }
     setSending(true);
     const tempId = `local-${Date.now()}`;
     const optimisticMsg: ChatMessage = {
       id: tempId,
-      text: trimmed,
+      text: textToSend,
       senderId: user.uid,
       createdAt: new Date(),
       expiresAfterView: secretMode,
@@ -506,7 +531,7 @@ export default function ChatScreen() {
         {
           participants: [user.uid, otherId],
           updatedAt: serverTimestamp(),
-          lastMessage: trimmed,
+          lastMessage: textToSend,
           lastSender: user.uid,
           names: {
             ...(otherName ? { [otherId]: otherName } : {}),
@@ -520,7 +545,7 @@ export default function ChatScreen() {
       );
 
       await addDoc(collection(db, 'chats', chatId, 'messages'), {
-        text: trimmed,
+        text: textToSend,
         senderId: user.uid,
         createdAt: serverTimestamp(),
         expiresAfterView: secretMode,
@@ -1493,12 +1518,21 @@ export default function ChatScreen() {
           windowSize={7}
           removeClippedSubviews={true}
           ListEmptyComponent={
-            <View style={styles.emptyChat}>
-              <Ionicons name="chatbubbles-outline" size={36} color={palette.muted} />
-              <Text style={[styles.emptyChatText, { color: palette.muted }]}>
-                Nessun messaggio in questa chat.
-              </Text>
-            </View>
+            messagesLoading ? (
+              <View style={styles.emptyChat}>
+                <ActivityIndicator size="large" color={palette.tint} />
+                <Text style={[styles.loadingText, { color: palette.muted }]}>
+                  Caricamento messaggi...
+                </Text>
+              </View>
+            ) : (
+              <View style={styles.emptyChat}>
+                <Ionicons name="chatbubbles-outline" size={36} color={palette.muted} />
+                <Text style={[styles.emptyChatText, { color: palette.muted }]}>
+                  Nessun messaggio in questa chat.
+                </Text>
+              </View>
+            )
           }
         />
 
@@ -1512,26 +1546,6 @@ export default function ChatScreen() {
                 backgroundColor: palette.card,
                 borderColor: palette.border,
               }]}>
-                <Pressable style={[styles.actionButton, styles.actionButtonRow]} onPress={handleSendImage}>
-                  <View style={[styles.actionIcon, { backgroundColor: `${palette.tint}15` }]}>
-                    <Ionicons name="image" size={22} color={palette.tint} />
-                  </View>
-                  <View style={styles.actionLabels}>
-                    <Text style={[styles.actionText, { color: palette.text }]}>Foto</Text>
-                    <Text style={[styles.actionSubText, { color: palette.muted }]}>Invia un'immagine</Text>
-                  </View>
-                </Pressable>
-                
-                <Pressable style={[styles.actionButton, styles.actionButtonRow]} onPress={handleAddEmoji}>
-                  <View style={[styles.actionIcon, { backgroundColor: `${palette.tint}15` }]}>
-                    <Ionicons name="happy-outline" size={22} color={palette.tint} />
-                  </View>
-                  <View style={styles.actionLabels}>
-                    <Text style={[styles.actionText, { color: palette.text }]}>Emoji</Text>
-                    <Text style={[styles.actionSubText, { color: palette.muted }]}>Inserisci una faccina</Text>
-                  </View>
-                </Pressable>
-                
                 <Pressable style={[styles.actionButton, styles.actionButtonRow]} onPress={handleSendLocation} disabled={sendingLocation}>
                   <View style={[styles.actionIcon, { backgroundColor: `${palette.tint}15` }]}>
                     {sendingLocation ? (
@@ -1545,7 +1559,7 @@ export default function ChatScreen() {
                     <Text style={[styles.actionSubText, { color: palette.muted }]}>Condividi coordinate</Text>
                   </View>
                 </Pressable>
-                
+
                 <Pressable
                   style={[styles.actionButton, styles.actionButtonRow]}
                   onPress={() =>
@@ -1579,29 +1593,26 @@ export default function ChatScreen() {
                       {translateAllEnabled ? 'Traduzione ON' : 'Traduci chat'}
                     </Text>
                     <Text style={[styles.actionSubText, { color: palette.muted }]} numberOfLines={1}>
-                      Origine: {sourceLang.toUpperCase()} → IT
+                      Arrivo -> IT | Invio -> {outgoingTargetLang.toUpperCase()}
                     </Text>
                   </View>
                 </Pressable>
+
                 <Pressable
                   style={[styles.actionButton, styles.actionButtonRow]}
                   onPress={() => {
-                    const idx = TRANSLATE_SOURCE_OPTIONS.indexOf(sourceLang);
-                    const next = TRANSLATE_SOURCE_OPTIONS[(idx + 1) % TRANSLATE_SOURCE_OPTIONS.length];
-                    setSourceLang(next);
-                    setTranslations({});
-                    if (translateAllEnabled) {
-                      translateAllMessages();
-                    }
+                    const idx = OUTGOING_TARGET_OPTIONS.indexOf(outgoingTargetLang);
+                    const next = OUTGOING_TARGET_OPTIONS[(idx + 1) % OUTGOING_TARGET_OPTIONS.length];
+                    setOutgoingTargetLang(next);
                   }}
                 >
                   <View style={[styles.actionIcon, { backgroundColor: `${palette.tint}12` }]}>
                     <Ionicons name="swap-horizontal" size={20} color={palette.text} />
                   </View>
                   <View style={styles.actionLabels}>
-                    <Text style={[styles.actionText, { color: palette.text }]}>Cambia lingua</Text>
+                    <Text style={[styles.actionText, { color: palette.text }]}>Lingua di invio</Text>
                     <Text style={[styles.actionSubText, { color: palette.muted }]} numberOfLines={1}>
-                      Origine attuale: {sourceLang.toUpperCase()}
+                      Invia in: {outgoingTargetLang.toUpperCase()}
                     </Text>
                   </View>
                 </Pressable>
@@ -1627,26 +1638,6 @@ export default function ChatScreen() {
                       Messaggi autodistruzione
                     </Text>
                   </View>
-                </Pressable>
-                
-                <Pressable style={styles.actionButton} onPress={handleRecordAudio}>
-                  <View style={[
-                    styles.actionIcon,
-                    { backgroundColor: isRecording ? `${palette.tint}25` : `${palette.tint}15` },
-                  ]}>
-                    {sendingAudio ? (
-                      <ActivityIndicator size="small" color={palette.tint} />
-                    ) : (
-                      <Ionicons
-                        name={isRecording ? 'stop' : 'mic-outline'}
-                        size={22}
-                        color={palette.tint}
-                      />
-                    )}
-                  </View>
-                  <Text style={[styles.actionText, { color: palette.muted }]}>
-                    {isRecording ? 'Ferma' : 'Audio'}
-                  </Text>
                 </Pressable>
               </View>
             )}
@@ -1680,7 +1671,7 @@ export default function ChatScreen() {
               >
                 <Ionicons name="language-outline" size={16} color={palette.accent} />
                 <Text style={[styles.secretBannerText, { color: palette.text }]}>
-                  Traduzione automatica attiva · Origine: {sourceLang.toUpperCase()}
+                  Traduzione automatica attiva | Arrivo -> IT | Invio -> {outgoingTargetLang.toUpperCase()}
                 </Text>
               </View>
             )}
@@ -1703,7 +1694,7 @@ export default function ChatScreen() {
               <TextInput
                 value={input}
                 onChangeText={setInput}
-                placeholder={isRecording ? '' : 'Scrivi un messaggio...'}
+                placeholder={isRecording ? '' : 'messaggio..'}
                 placeholderTextColor={palette.muted}
                 style={[styles.textInput, { 
                   color: palette.text,
@@ -1715,6 +1706,22 @@ export default function ChatScreen() {
                 underlineColorAndroid="transparent"
                 editable={!isRecording}
               />
+
+              <Pressable
+                style={[
+                  styles.voiceButton,
+                  { backgroundColor: palette.card },
+                  (sendingImage || isRecording) && { opacity: 0.6 },
+                ]}
+                onPress={handleSendImage}
+                disabled={sendingImage || isRecording}
+              >
+                {sendingImage ? (
+                  <ActivityIndicator size="small" color={palette.text} />
+                ) : (
+                  <Ionicons name="camera-outline" size={20} color={palette.text} />
+                )}
+              </Pressable>
               
               {input.trim() ? (
                 <Pressable
@@ -2066,6 +2073,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     textAlign: 'center',
   },
+  loadingText: {
+    marginTop: 8,
+    fontSize: 14,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
   messageRow: {
     flexDirection: 'row',
     marginBottom: 4,
@@ -2252,8 +2265,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   actionsPanel: {
-    flexDirection: 'column',
+    flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 10,
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
     paddingVertical: 12,
     borderBottomWidth: 1,
@@ -2262,6 +2277,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 10,
+    width: '48%',
   },
   actionButtonRow: {
     alignItems: 'flex-start',

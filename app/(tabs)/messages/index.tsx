@@ -1,6 +1,6 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Image } from 'expo-image';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { collection, doc, onSnapshot, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, View, useColorScheme } from 'react-native';
@@ -28,12 +28,20 @@ export default function MessagesListScreen() {
   const palette = Colors[colorScheme ?? 'light'];
   const [chats, setChats] = useState<ChatPreview[]>([]);
   const [loading, setLoading] = useState(true);
+  const [openingChatId, setOpeningChatId] = useState<string | null>(null);
+
+  useFocusEffect(() => {
+    // Resetta il loader quando si rientra nella lista
+    setOpeningChatId(null);
+  });
 
   useEffect(() => {
     if (!user?.uid) {
+      setChats([]);
       setLoading(false);
       return;
     }
+    setLoading(true);
 
     const q = query(
       collection(db, 'chats'),
@@ -87,6 +95,9 @@ export default function MessagesListScreen() {
     return (
       <Pressable
         onPress={() => {
+          if (openingChatId === item.id) return;
+          setOpeningChatId(item.id);
+
           // Segna come letto se non l'hai già fatto
           if (hasUnread && user?.uid) {
             setDoc(
@@ -161,6 +172,11 @@ export default function MessagesListScreen() {
             {/* Badge non letto (se applicabile) - ora è un pallino invece che "Nuovo" */}
             {hasUnread && (
               <View style={[styles.unreadDot, { backgroundColor: palette.tint }]} />
+            )}
+            {openingChatId === item.id && (
+              <View style={styles.cardLoader}>
+                <ActivityIndicator size="small" color={palette.tint} />
+              </View>
             )}
           </View>
         )}
@@ -321,6 +337,17 @@ const styles = StyleSheet.create({
     height: 12,
     borderRadius: 6,
     marginLeft: 8,
+  },
+  cardLoader: {
+    position: 'absolute',
+    right: 12,
+    top: 12,
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.08)',
   },
   loadingContainer: {
     alignItems: 'center',
