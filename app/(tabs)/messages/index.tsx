@@ -18,6 +18,7 @@ type ChatPreview = {
   updatedAt?: any;
   names?: Record<string, string>;
   photos?: Record<string, string>;
+  blockedBy?: Record<string, any>;
 };
 
 const FALLBACK_PHOTO = 'https://ui-avatars.com/api/?name=User&background=random';
@@ -61,7 +62,12 @@ export default function MessagesListScreen() {
         return bTime - aTime;
       });
 
-      setChats(chatList);
+      const visible = chatList.filter((c) => {
+        const blocked = c.blockedBy && Object.keys(c.blockedBy).length > 0;
+        return !blocked;
+      });
+
+      setChats(visible);
       setLoading(false);
     }, (error) => {
       console.error('Error fetching chats:', error);

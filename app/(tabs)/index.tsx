@@ -18,6 +18,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/hooks/use-auth';
 import { useProfiles } from '@/hooks/use-profiles';
+import { doc, getDoc } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
 
 const FALLBACK_PHOTO =
   'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=900&q=80';
@@ -28,12 +30,53 @@ export default function CompactGridScreen() {
   const [search, setSearch] = useState('');
   const { user } = useAuth();
   const { data, loading, error, refresh, refreshing } = useProfiles();
+  const [blockedIds, setBlockedIds] = useState<string[]>([]);
+  const [blockedByIds, setBlockedByIds] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      if (!user?.uid) {
+        setBlockedIds([]);
+        setBlockedByIds([]);
+        return;
+      }
+      try {
+        const snap = await getDoc(doc(db, 'profiles', user.uid));
+        if (!active) return;
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          setBlockedIds(Array.isArray(data.blocked) ? data.blocked : []);
+          setBlockedByIds(Array.isArray(data.blockedBy) ? data.blockedBy : []);
+        } else {
+          setBlockedIds([]);
+          setBlockedByIds([]);
+        }
+      } catch (e) {
+        if (!active) return;
+        setBlockedIds([]);
+        setBlockedByIds([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [user?.uid]);
 
   const profiles = useMemo(() => {
     const base = data;
     if (!user?.uid) return base;
-    return base.filter((p) => p.id !== user.uid);
-  }, [data, user?.uid]);
+    return base.filter((p) => {
+      if (p.id === user.uid) return false;
+      const targetBlockedBy = Array.isArray((p as any).blockedBy) ? (p as any).blockedBy : [];
+      const targetBlocked = Array.isArray((p as any).blocked) ? (p as any).blocked : [];
+      if (blockedIds.includes(p.id)) return false;
+      if (blockedByIds.includes(p.id)) return false;
+      if (targetBlocked.includes(user.uid)) return false;
+      if (targetBlockedBy.includes(user.uid)) return false;
+      return true;
+    });
+  }, [data, user?.uid, blockedIds, blockedByIds]);
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
     if (!term) return profiles;

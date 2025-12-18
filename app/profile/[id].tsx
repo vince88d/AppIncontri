@@ -37,6 +37,8 @@ type Profile = {
   intent?: string;
   bio?: string;
   jobTitle?: string;
+  blocked?: string[];
+  blockedBy?: string[];
 };
 
 const FALLBACK_PHOTO =
@@ -54,6 +56,8 @@ export default function ProfileDetailScreen() {
   const [isEditing, setIsEditing] = useState(false);
   const [viewPhoto, setViewPhoto] = useState<string | null>(null);
   const [viewPhotoVisible, setViewPhotoVisible] = useState(false);
+  const [myBlocked, setMyBlocked] = useState<string[]>([]);
+  const [myBlockedBy, setMyBlockedBy] = useState<string[]>([]);
 
   const [name, setName] = useState('');
   const [age, setAge] = useState('');
@@ -100,11 +104,49 @@ export default function ProfileDetailScreen() {
     };
   }, [id]);
 
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      if (!user?.uid) {
+        setMyBlocked([]);
+        setMyBlockedBy([]);
+        return;
+      }
+      try {
+        const snap = await getDoc(doc(db, 'profiles', user.uid));
+        if (!active) return;
+        if (snap.exists()) {
+          const data = snap.data() as any;
+          setMyBlocked(Array.isArray(data.blocked) ? data.blocked : []);
+          setMyBlockedBy(Array.isArray(data.blockedBy) ? data.blockedBy : []);
+        } else {
+          setMyBlocked([]);
+          setMyBlockedBy([]);
+        }
+      } catch (e) {
+        if (!active) return;
+        setMyBlocked([]);
+        setMyBlockedBy([]);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [user?.uid]);
+
   const isOwner = user?.uid === profile?.id;
   const originalPhotos = useMemo(
     () => (profile ? profile.photos ?? (profile.photo ? [profile.photo] : []) : []),
     [profile]
   );
+  const isBlockedView = useMemo(() => {
+    if (!profile || !user?.uid || isOwner) return false;
+    const blockedByTarget = Array.isArray(profile.blocked) && profile.blocked.includes(user.uid);
+    const targetSaysNo = Array.isArray(profile.blockedBy) && profile.blockedBy.includes(user.uid);
+    const iBlocked = myBlocked.includes(profile.id);
+    const iAmBlockedBy = myBlockedBy.includes(profile.id);
+    return blockedByTarget || targetSaysNo || iBlocked || iAmBlockedBy;
+  }, [profile, user?.uid, isOwner, myBlocked, myBlockedBy]);
   const hasUnsavedChanges = useMemo(() => {
     if (!profile) return false;
     const ageChanged = age.trim() !== String(profile.age ?? '');
@@ -126,6 +168,19 @@ export default function ProfileDetailScreen() {
       photosChanged
     );
   }, [profile, name, age, city, bio, jobTitle, role, intent, userInterests, photos, originalPhotos]);
+
+  if (isBlockedView && !isOwner && !loading) {
+    return (
+      <SafeAreaView style={[styles.screen, { backgroundColor: palette.background }]}>
+        <View style={styles.loadingContainer}>
+          <Ionicons name="lock-closed-outline" size={32} color={palette.muted} />
+          <Text style={[styles.loadingText, { color: palette.muted }]}>
+            Profilo non disponibile.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   const chatId = useMemo(() => {
     if (!user?.uid || !profile?.id) return null;

@@ -10,7 +10,10 @@ import {
   addDoc,
   collection,
   deleteDoc,
+  deleteField,
   doc,
+  arrayUnion,
+  arrayRemove,
   limit as firestoreLimit,
   getDoc,
   getDocs,
@@ -33,6 +36,7 @@ import {
   Modal,
   Platform,
   Pressable,
+  Switch,
   StyleSheet,
   Text,
   TextInput,
@@ -59,6 +63,11 @@ type ChatMessage = {
     lat: number;
     lng: number;
   };
+};
+
+type TranslationEntry = {
+  text: string | null;
+  target: string;
 };
 
 // Componente ParticleEffect semplificato
@@ -154,8 +163,8 @@ const ParticleEffect = React.memo(({ visible, color }: { visible: boolean; color
 const FALLBACK_PHOTO = 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=900&q=80';
 const SECRET_EXPIRY_MS = 10_000;
 const INITIAL_MESSAGES_LIMIT = 30;
-const OUTGOING_TARGET_OPTIONS = ['en', 'es', 'fr', 'de', 'it'];
-const TARGET_TRANSLATION_LANG = 'it';
+const TRANSLATION_LANG_OPTIONS = ['en', 'es', 'fr', 'de', 'it'];
+const DEFAULT_INCOMING_TRANSLATION_LANG = 'it';
 
 export default function ChatScreen() {
   const { id: otherId, name: initialName, photo: initialPhoto, chatId: chatIdParam } =
@@ -192,7 +201,13 @@ export default function ChatScreen() {
   const [translateAllEnabled, setTranslateAllEnabled] = useState(false);
   const [translatingAll, setTranslatingAll] = useState(false);
   const [outgoingTargetLang, setOutgoingTargetLang] = useState<string>('en');
-  const [translations, setTranslations] = useState<Record<string, string | null>>({});
+  const [incomingTargetLang, setIncomingTargetLang] = useState<string>(
+    DEFAULT_INCOMING_TRANSLATION_LANG
+  );
+  const [translationSettingsVisible, setTranslationSettingsVisible] = useState(false);
+  const [translations, setTranslations] = useState<Record<string, TranslationEntry | undefined>>(
+    {}
+  );
   const [translatingMap, setTranslatingMap] = useState<Record<string, boolean>>({});
   const [fadingMap, setFadingMap] = useState<Record<string, boolean>>({});
   const [showParticles, setShowParticles] = useState<Record<string, boolean>>({});
@@ -201,6 +216,7 @@ export default function ChatScreen() {
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [playingId, setPlayingId] = useState<string | null>(null);
   const [playbackStatus, setPlaybackStatus] = useState<Audio.AVPlaybackStatus | null>(null);
+  const [blockingUser, setBlockingUser] = useState(false);
   
   const flatListRef = useRef<FlatList<ChatMessage>>(null);
   const scrollTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -333,6 +349,26 @@ export default function ChatScreen() {
     };
   }, [otherId, initialName, initialPhoto]);
 
+  const isBlocked = useMemo(() => {
+    if (!user?.uid) return false;
+    return !!chatMeta?.blockedBy?.[user.uid];
+  }, [chatMeta?.blockedBy, user?.uid]);
+
+  const chatBlocked = useMemo(() => {
+    const blockedBy = chatMeta?.blockedBy;
+    if (!blockedBy) return false;
+    return Object.keys(blockedBy).length > 0;
+  }, [chatMeta?.blockedBy]);
+  const chatDismissedRef = useRef(false);
+
+  useEffect(() => {
+    if (chatBlocked && !chatDismissedRef.current) {
+      chatDismissedRef.current = true;
+      Alert.alert('Chat bloccata', 'Questa chat non è più disponibile.');
+      router.back();
+    }
+  }, [chatBlocked]);
+
   // Carica messaggi
   useEffect(() => {
     if (!chatId) {
@@ -417,14 +453,26 @@ export default function ChatScreen() {
     });
   }, [chatId, user?.uid, messages, pendingMessages, chatMeta, initialLoadDone]);
 
+  const cycleLang = useCallback((current: string) => {
+    const idx = TRANSLATION_LANG_OPTIONS.indexOf(current);
+    return TRANSLATION_LANG_OPTIONS[(idx + 1) % TRANSLATION_LANG_OPTIONS.length];
+  }, []);
+
+  const getTargetLangForMessage = useCallback(
+    (message: ChatMessage) =>
+      message.senderId === user?.uid ? outgoingTargetLang : incomingTargetLang,
+    [outgoingTargetLang, incomingTargetLang, user?.uid]
+  );
+
   const translateText = useCallback(
     async (message: ChatMessage) => {
       if (!message.text || !message.id) return;
       if (translatingMap[message.id]) return;
+      const targetLang = getTargetLangForMessage(message);
       setTranslatingMap((prev) => ({ ...prev, [message.id]: true }));
       try {
         const res = await fetch(
-          `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${TARGET_TRANSLATION_LANG}&dt=t&q=${encodeURIComponent(
+          `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${targetLang}&dt=t&q=${encodeURIComponent(
             message.text
           )}`
         );
@@ -433,23 +481,32 @@ export default function ChatScreen() {
           Array.isArray(data) && Array.isArray(data[0])
             ? data[0].map((part: any) => part[0]).join('')
             : null;
-        setTranslations((prev) => ({ ...prev, [message.id]: translated }));
+        setTranslations((prev) => ({
+          ...prev,
+          [message.id]: { text: translated, target: targetLang },
+        }));
       } catch (e) {
-        setTranslations((prev) => ({ ...prev, [message.id]: null }));
+        setTranslations((prev) => ({
+          ...prev,
+          [message.id]: { text: null, target: targetLang },
+        }));
       } finally {
         setTranslatingMap((prev) => ({ ...prev, [message.id]: false }));
       }
     },
-    [translatingMap]
+    [translatingMap, getTargetLangForMessage]
   );
 
   const translateAllMessages = useCallback(
     async () => {
       setTranslatingAll(true);
       try {
-        const toTranslate = [...messages, ...pendingMessages].filter(
-          (m) => m.text && translations[m.id] === undefined
-        );
+        const toTranslate = [...messages, ...pendingMessages].filter((m) => {
+          if (!m.text) return false;
+          const desiredTarget = getTargetLangForMessage(m);
+          const existing = translations[m.id];
+          return !existing || existing.target !== desiredTarget;
+        });
         for (const m of toTranslate) {
           // sequenziale per evitare rate limit
           // eslint-disable-next-line no-await-in-loop
@@ -459,8 +516,18 @@ export default function ChatScreen() {
         setTranslatingAll(false);
       }
     },
-    [messages, pendingMessages, translations, translateText]
+    [messages, pendingMessages, translations, translateText, getTargetLangForMessage]
   );
+
+  const handleToggleTranslateAll = useCallback(() => {
+    setTranslateAllEnabled((prev) => {
+      const next = !prev;
+      if (next) {
+        translateAllMessages();
+      }
+      return next;
+    });
+  }, [translateAllMessages]);
 
   useEffect(() => {
     if (initialLoadDone) {
@@ -471,10 +538,15 @@ export default function ChatScreen() {
   // auto-traduci nuovi messaggi quando la traduzione globale è attiva
   useEffect(() => {
     if (!translateAllEnabled) return;
-    const toTranslate = messages.filter((m) => m.text && translations[m.id] === undefined);
+    const toTranslate = messages.filter((m) => {
+      if (!m.text) return false;
+      const desiredTarget = getTargetLangForMessage(m);
+      const existing = translations[m.id];
+      return !existing || existing.target !== desiredTarget;
+    });
     if (!toTranslate.length) return;
     translateAllMessages();
-  }, [messages, translateAllEnabled, translations, translateAllMessages]);
+  }, [messages, translateAllEnabled, translations, translateAllMessages, getTargetLangForMessage]);
 
   const translateOutgoingText = useCallback(async (text: string, target: string) => {
     try {
@@ -505,6 +577,14 @@ export default function ChatScreen() {
 
   const handleSend = async () => {
     if (!chatId || !user?.uid || !otherId) return;
+    if (chatBlocked) {
+      Alert.alert('Chat bloccata', 'Sblocca per inviare nuovi messaggi.');
+      return;
+    }
+    if (isBlocked) {
+      Alert.alert('Utente bloccato', 'Sblocca per inviare nuovi messaggi.');
+      return;
+    }
     const trimmed = input.trim();
     if (!trimmed) return;
     let textToSend = trimmed;
@@ -936,6 +1016,60 @@ export default function ChatScreen() {
     );
   };
 
+  const handleToggleBlock = useCallback(() => {
+    if (!chatId || !user?.uid || !otherId) return;
+    if (blockingUser) return;
+    const nextBlocked = !isBlocked;
+    const title = nextBlocked ? 'Blocca utente' : 'Sblocca utente';
+    const message = nextBlocked
+      ? 'Vuoi bloccare questo utente? Non vi vedrete più e la chat sparirà.'
+      : 'Vuoi sbloccare questo utente? Potrete tornare a vedervi e chattare.';
+    Alert.alert(title, message, [
+      { text: 'Annulla', style: 'cancel' },
+      {
+        text: nextBlocked ? 'Blocca' : 'Sblocca',
+        style: nextBlocked ? 'destructive' : 'default',
+        onPress: async () => {
+          setBlockingUser(true);
+          try {
+            await Promise.all([
+              setDoc(
+                doc(db, 'chats', chatId),
+                {
+                  blockedBy: {
+                    [user.uid]: nextBlocked ? serverTimestamp() : deleteField(),
+                  },
+                },
+                { merge: true }
+              ),
+              setDoc(
+                doc(db, 'profiles', user.uid),
+                {
+                  blocked: nextBlocked ? arrayUnion(otherId) : arrayRemove(otherId),
+                },
+                { merge: true }
+              ),
+              setDoc(
+                doc(db, 'profiles', otherId),
+                {
+                  blockedBy: nextBlocked ? arrayUnion(user.uid) : arrayRemove(user.uid),
+                },
+                { merge: true }
+              ),
+            ]);
+            if (nextBlocked) {
+              router.back();
+            }
+          } catch (e) {
+            Alert.alert('Errore', 'Operazione non riuscita, riprova.');
+          } finally {
+            setBlockingUser(false);
+          }
+        },
+      },
+    ]);
+  }, [chatId, otherId, user?.uid, blockingUser, isBlocked]);
+
   const formatAudioDuration = (ms?: number) => {
     if (ms === undefined || ms === null) return '0:00';
     const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -1107,7 +1241,26 @@ export default function ChatScreen() {
     const isLockedImage =
       isEphemeralImage && !item.expiresAt && !expiryStartedRef.current.has(item.id);
     const isFading = !!fadingMap[item.id];
-    const translatedText = translations[item.id];
+    const createdAtMs =
+      item.createdAt instanceof Date
+        ? item.createdAt.getTime()
+        : (item.createdAt as any)?.toDate
+        ? (item.createdAt as any).toDate().getTime()
+        : 0;
+    const otherReadMs =
+      chatMeta?.readBy?.[otherId]?.toDate?.()
+        ? chatMeta.readBy[otherId].toDate().getTime()
+        : chatMeta?.readBy?.[otherId] instanceof Date
+        ? (chatMeta.readBy[otherId] as Date).getTime()
+        : 0;
+    const isReadByOther = isMine && createdAtMs && otherReadMs && otherReadMs >= createdAtMs;
+    const isSendingLocal = isMine && item.id.startsWith('local-');
+    const statusColor = isMine ? 'rgba(255,255,255,0.7)' : palette.muted;
+    const statusIconColor = isReadByOther ? palette.accent : statusColor;
+    const translation = translations[item.id];
+    const desiredTarget = getTargetLangForMessage(item);
+    const translatedText =
+      translation && translation.target === desiredTarget ? translation.text : undefined;
     const translating = translatingMap[item.id];
     const showParticleEffect = !!showParticles[item.id];
     const displayText =
@@ -1174,9 +1327,17 @@ export default function ChatScreen() {
                   <Ionicons name="chevron-forward" size={16} color={isMine ? '#fff' : palette.muted} />
                 )}
               </View>
-              <Text style={[styles.timeInside, { color: isMine ? 'rgba(255,255,255,0.7)' : palette.muted }]}>
-                {time}
-              </Text>
+              <View style={styles.statusRow}>
+                <Text style={[styles.timeInside, { color: statusColor }]}>{time}</Text>
+                {isMine && !isSendingLocal ? (
+                  <Ionicons
+                    name={isReadByOther ? 'checkmark-done' : 'checkmark'}
+                    size={16}
+                    color={statusIconColor}
+                    style={styles.statusIcon}
+                  />
+                ) : null}
+              </View>
               {isEphemeral ? (
                 <View
                   style={[
@@ -1284,14 +1445,17 @@ export default function ChatScreen() {
                   <Text style={[styles.audioLabel, { color: isMine ? '#fff' : palette.text }]}>
                     Audio
                   </Text>
-                  <Text
-                    style={[
-                      styles.timeInside,
-                      { color: isMine ? 'rgba(255,255,255,0.7)' : palette.muted },
-                    ]}
-                  >
-                    {time}
-                  </Text>
+                  <View style={styles.statusRow}>
+                    <Text style={[styles.timeInside, { color: statusColor }]}>{time}</Text>
+                    {isMine && !isSendingLocal ? (
+                      <Ionicons
+                        name={isReadByOther ? 'checkmark-done' : 'checkmark'}
+                        size={16}
+                        color={statusIconColor}
+                        style={styles.statusIcon}
+                      />
+                    ) : null}
+                  </View>
                 </View>
               </View>
 
@@ -1419,14 +1583,17 @@ export default function ChatScreen() {
               <ActivityIndicator size="small" color={isMine ? '#fff' : palette.text} />
             ) : null}
 
-            <Text
-              style={[
-                styles.timeInside,
-                { color: isMine ? 'rgba(255,255,255,0.7)' : palette.muted },
-              ]}
-            >
-              {time}
-            </Text>
+            <View style={styles.statusRow}>
+              <Text style={[styles.timeInside, { color: statusColor }]}>{time}</Text>
+              {isMine && !isSendingLocal ? (
+                <Ionicons
+                  name={isReadByOther ? 'checkmark-done' : 'checkmark'}
+                  size={16}
+                  color={statusIconColor}
+                  style={styles.statusIcon}
+                />
+              ) : null}
+            </View>
           </View>
         </Animated.View>
         
@@ -1475,17 +1642,43 @@ export default function ChatScreen() {
         </View>
       </View>
       
-      <Pressable
-        style={[styles.iconButton, { backgroundColor: palette.card }]}
-        onPress={handleDeleteChat}
-        disabled={deletingChat}
-      >
-        {deletingChat ? (
-          <ActivityIndicator size="small" color={palette.text} />
-        ) : (
-          <Ionicons name="trash-outline" size={20} color={palette.text} />
-        )}
-      </Pressable>
+      <View style={styles.headerActions}>
+        <Pressable
+          style={[
+            styles.blockBadge,
+            {
+              backgroundColor: isBlocked ? `${palette.accent}22` : `${palette.tint}12`,
+              borderColor: isBlocked ? palette.accent : palette.border,
+            },
+          ]}
+          onPress={handleToggleBlock}
+        >
+          {blockingUser ? (
+            <ActivityIndicator size="small" color={palette.text} />
+          ) : (
+            <Text
+              style={[
+                styles.blockBadgeText,
+                { color: isBlocked ? palette.accent : palette.text },
+              ]}
+            >
+              {isBlocked ? 'Sblocca' : 'Blocca'}
+            </Text>
+          )}
+        </Pressable>
+
+        <Pressable
+          style={[styles.iconButton, { backgroundColor: palette.card }]}
+          onPress={handleDeleteChat}
+          disabled={deletingChat || blockingUser}
+        >
+          {deletingChat ? (
+            <ActivityIndicator size="small" color={palette.text} />
+          ) : (
+            <Ionicons name="trash-outline" size={20} color={palette.text} />
+          )}
+        </Pressable>
+      </View>
     </View>
   );
 
@@ -1562,15 +1755,8 @@ export default function ChatScreen() {
 
                 <Pressable
                   style={[styles.actionButton, styles.actionButtonRow]}
-                  onPress={() =>
-                    setTranslateAllEnabled((prev) => {
-                      const next = !prev;
-                      if (next) {
-                        translateAllMessages();
-                      }
-                      return next;
-                    })
-                  }
+                  onPress={() => setTranslationSettingsVisible(true)}
+                  onLongPress={handleToggleTranslateAll}
                   >
                     <View
                       style={[
@@ -1593,30 +1779,11 @@ export default function ChatScreen() {
                       {translateAllEnabled ? 'Traduzione ON' : 'Traduci chat'}
                     </Text>
                     <Text style={[styles.actionSubText, { color: palette.muted }]} numberOfLines={1}>
-                      Arrivo -> IT | Invio -> {outgoingTargetLang.toUpperCase()}
+                      Arrivo -> {incomingTargetLang.toUpperCase()} | Invio -> {outgoingTargetLang.toUpperCase()}
                     </Text>
                   </View>
                 </Pressable>
 
-                <Pressable
-                  style={[styles.actionButton, styles.actionButtonRow]}
-                  onPress={() => {
-                    const idx = OUTGOING_TARGET_OPTIONS.indexOf(outgoingTargetLang);
-                    const next = OUTGOING_TARGET_OPTIONS[(idx + 1) % OUTGOING_TARGET_OPTIONS.length];
-                    setOutgoingTargetLang(next);
-                  }}
-                >
-                  <View style={[styles.actionIcon, { backgroundColor: `${palette.tint}12` }]}>
-                    <Ionicons name="swap-horizontal" size={20} color={palette.text} />
-                  </View>
-                  <View style={styles.actionLabels}>
-                    <Text style={[styles.actionText, { color: palette.text }]}>Lingua di invio</Text>
-                    <Text style={[styles.actionSubText, { color: palette.muted }]} numberOfLines={1}>
-                      Invia in: {outgoingTargetLang.toUpperCase()}
-                    </Text>
-                  </View>
-                </Pressable>
-                
                 <Pressable style={[styles.actionButton, styles.actionButtonRow]} onPress={() => setSecretMode((prev) => !prev)}>
                   <View
                     style={[
@@ -1671,7 +1838,7 @@ export default function ChatScreen() {
               >
                 <Ionicons name="language-outline" size={16} color={palette.accent} />
                 <Text style={[styles.secretBannerText, { color: palette.text }]}>
-                  Traduzione automatica attiva | Arrivo -> IT | Invio -> {outgoingTargetLang.toUpperCase()}
+                  Traduzione automatica attiva | Arrivo -> {incomingTargetLang.toUpperCase()} | Invio -> {outgoingTargetLang.toUpperCase()}
                 </Text>
               </View>
             )}
@@ -1802,6 +1969,99 @@ export default function ChatScreen() {
           </View>
         </View>
       </KeyboardAvoidingView>
+
+      <Modal
+        visible={translationSettingsVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setTranslationSettingsVisible(false)}
+      >
+        <View style={styles.translationModalBackdrop}>
+          <View
+            style={[
+              styles.translationModalCard,
+              { backgroundColor: palette.card, borderColor: palette.border },
+            ]}
+          >
+            <View style={styles.translationModalHeader}>
+              <Text style={[styles.translationModalTitle, { color: palette.text }]}>
+                Impostazioni traduzione
+              </Text>
+              <Pressable
+                style={[styles.modalButton, styles.translationCloseButton]}
+                onPress={() => setTranslationSettingsVisible(false)}
+              >
+                <Ionicons name="close" size={20} color={palette.text} />
+              </Pressable>
+            </View>
+
+            <View style={styles.translationModalRow}>
+              <View style={styles.translationModalLabelWrap}>
+                <Text style={[styles.translationModalLabel, { color: palette.text }]}>
+                  Traduci automaticamente
+                </Text>
+                <Text style={[styles.translationModalHint, { color: palette.muted }]}>
+                  Mantieni i messaggi nella lingua scelta
+                </Text>
+              </View>
+              <Switch
+                value={translateAllEnabled}
+                onValueChange={handleToggleTranslateAll}
+                trackColor={{ false: palette.border, true: palette.accent }}
+                thumbColor={translateAllEnabled ? '#fff' : '#f4f3f4'}
+              />
+            </View>
+
+            <Pressable
+              style={styles.translationModalRow}
+              onPress={() => setIncomingTargetLang((prev) => cycleLang(prev))}
+            >
+              <View style={styles.translationModalLabelWrap}>
+                <Text style={[styles.translationModalLabel, { color: palette.text }]}>
+                  Lingua di arrivo
+                </Text>
+                <Text style={[styles.translationModalHint, { color: palette.muted }]}>
+                  Mostra i messaggi ricevuti in
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.translationBadge,
+                  { backgroundColor: `${palette.tint}12`, borderColor: palette.border },
+                ]}
+              >
+                <Text style={[styles.translationModalLabel, { color: palette.text }]}>
+                  {incomingTargetLang.toUpperCase()}
+                </Text>
+              </View>
+            </Pressable>
+
+            <Pressable
+              style={styles.translationModalRow}
+              onPress={() => setOutgoingTargetLang((prev) => cycleLang(prev))}
+            >
+              <View style={styles.translationModalLabelWrap}>
+                <Text style={[styles.translationModalLabel, { color: palette.text }]}>
+                  Lingua di invio
+                </Text>
+                <Text style={[styles.translationModalHint, { color: palette.muted }]}>
+                  Traduce quello che scrivi
+                </Text>
+              </View>
+              <View
+                style={[
+                  styles.translationBadge,
+                  { backgroundColor: `${palette.tint}12`, borderColor: palette.border },
+                ]}
+              >
+                <Text style={[styles.translationModalLabel, { color: palette.text }]}>
+                  {outgoingTargetLang.toUpperCase()}
+                </Text>
+              </View>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
 
       <Modal
         visible={previewVisible}
@@ -1971,6 +2231,11 @@ const styles = StyleSheet.create({
     flex: 1,
     marginHorizontal: 12,
   },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   userInfo: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -2007,6 +2272,19 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: 'transparent',
+  },
+  blockBadge: {
+    minWidth: 72,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  blockBadgeText: {
+    fontSize: 13,
+    fontWeight: '700',
   },
   // Skeleton styles
   skeletonAvatar: {
@@ -2113,6 +2391,15 @@ const styles = StyleSheet.create({
     marginTop: 6,
     alignSelf: 'flex-end',
     opacity: 0.9,
+  },
+  statusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-end',
+  },
+  statusIcon: {
+    marginLeft: 2,
   },
   ephemeralRow: {
     marginTop: 8,
@@ -2413,6 +2700,61 @@ const styles = StyleSheet.create({
   },
   recordingCancel: {
     backgroundColor: '#ef4444',
+  },
+  translationModalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 20,
+  },
+  translationModalCard: {
+    width: '100%',
+    maxWidth: 480,
+    borderRadius: 16,
+    borderWidth: 1,
+    padding: 16,
+    gap: 14,
+  },
+  translationModalHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 4,
+  },
+  translationModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  translationModalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingVertical: 6,
+  },
+  translationModalLabelWrap: {
+    flex: 1,
+  },
+  translationModalLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  translationModalHint: {
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 2,
+  },
+  translationBadge: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 12,
+    borderWidth: 1,
+    minWidth: 70,
+    alignItems: 'center',
+  },
+  translationCloseButton: {
+    backgroundColor: 'transparent',
   },
   modalBackdrop: {
     flex: 1,

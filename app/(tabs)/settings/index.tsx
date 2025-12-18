@@ -1,4 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
+import { router } from 'expo-router';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { StyleSheet, Text, View, useColorScheme, Pressable } from 'react-native';
 import { signOut } from 'firebase/auth';
@@ -21,6 +22,17 @@ export default function SettingsScreen() {
       </Text>
 
       <View style={[styles.card, { borderColor: palette.border }]}>
+        <Pressable
+          onPress={() => router.push('/settings/blocked')}
+          style={[styles.rowBtn, { borderColor: palette.border }]}
+        >
+          <View style={styles.rowLeft}>
+            <Ionicons name="ban-outline" size={18} color={palette.text} />
+            <Text style={[styles.rowText, { color: palette.text }]}>Utenti bloccati</Text>
+          </View>
+          <Ionicons name="chevron-forward" size={16} color={palette.muted} />
+        </Pressable>
+
         <Pressable
           onPress={() => signOut(auth).catch(() => {})}
           style={[styles.logoutBtn, { backgroundColor: palette.tint }]}
@@ -57,6 +69,24 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderRadius: 12,
     gap: 12,
+  },
+  rowBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 12,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderRadius: 10,
+  },
+  rowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  rowText: {
+    fontSize: 15,
+    fontWeight: '700',
   },
   logoutBtn: {
     flexDirection: 'row',

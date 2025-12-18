@@ -14,6 +14,8 @@ type Profile = {
   interests: string[];
   bio?: string;
   jobTitle?: string;
+  blocked?: string[];
+  blockedBy?: string[];
 };
 
 export type { Profile };
