@@ -2,6 +2,7 @@ import { collection, getDocs } from 'firebase/firestore';
 import { useEffect, useRef, useState } from 'react';
 
 import { db } from '@/lib/firebase';
+import type { PhotoMeta } from '@/lib/moderation';
 
 type Profile = {
   id: string;
@@ -16,6 +17,7 @@ type Profile = {
   jobTitle?: string;
   blocked?: string[];
   blockedBy?: string[];
+  photoMeta?: PhotoMeta[];
 };
 
 export type { Profile };

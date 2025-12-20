@@ -24,6 +24,7 @@ import {
   setDoc,
   Timestamp,
 } from 'firebase/firestore';
+import { deleteObject, ref } from 'firebase/storage';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
@@ -47,7 +48,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/hooks/use-auth';
-import { db } from '@/lib/firebase';
+import { db, storage } from '@/lib/firebase';
+import { uploadImageToStorage } from '@/lib/storage';
 
 type ChatMessage = {
   id: string;
@@ -55,6 +57,9 @@ type ChatMessage = {
   senderId: string;
   createdAt?: Timestamp | Date;
   image?: string;
+  imagePath?: string;
+  moderationStatus?: 'pending' | 'ok' | 'flagged';
+  contentWarning?: 'nudity' | null;
   audio?: string;
   audioDuration?: number;
   expiresAfterView?: boolean;
@@ -196,6 +201,7 @@ export default function ChatScreen() {
   const [viewImageTimed, setViewImageTimed] = useState(false);
   const [viewImageCountdown, setViewImageCountdown] = useState<number | null>(null);
   const [viewImageExpiry, setViewImageExpiry] = useState<number | null>(null);
+  const [revealedWarnings, setRevealedWarnings] = useState<Record<string, boolean>>({});
   const [actionsOpen, setActionsOpen] = useState(false);
   const [secretMode, setSecretMode] = useState(false);
   const [translateAllEnabled, setTranslateAllEnabled] = useState(false);
@@ -669,6 +675,8 @@ export default function ChatScreen() {
       senderId: user.uid,
       createdAt: new Date(),
       image: dataUrl,
+      moderationStatus: 'pending',
+      contentWarning: null,
       expiresAfterView: timed || secretMode,
     };
     setPendingMessages((prev) => [...prev, optimisticMsg]);
@@ -688,15 +696,35 @@ export default function ChatScreen() {
             ...(otherPhoto ? { [otherId]: otherPhoto } : {}),
           },
         },
-        { merge: true }
-      );
+          { merge: true }
+        );
 
-      await addDoc(collection(db, 'chats', chatId, 'messages'), {
-        image: dataUrl,
-        expiresAfterView: timed || secretMode,
-        senderId: user.uid,
-        createdAt: serverTimestamp(),
-      });
+        const messageRef = doc(collection(db, 'chats', chatId, 'messages'));
+        const storagePath = `chat-images/${chatId}/${user.uid}/${messageRef.id}`;
+        const upload = await uploadImageToStorage({
+          uri: dataUrl,
+          path: storagePath,
+          metadata: {
+            kind: 'chat',
+            chatId,
+            messageId: messageRef.id,
+            senderId: user.uid,
+          },
+        });
+
+        await setDoc(
+          messageRef,
+          {
+          image: upload.url,
+          imagePath: upload.path,
+          moderationStatus: 'pending',
+          contentWarning: null,
+          expiresAfterView: timed || secretMode,
+          senderId: user.uid,
+          createdAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
       setPendingMessages((prev) => prev.filter((m) => m.id !== tempId));
     } catch (e) {
       setPendingMessages((prev) => prev.filter((m) => m.id !== tempId));
@@ -1211,6 +1239,55 @@ export default function ChatScreen() {
     setViewImageVisible(true);
   };
 
+  const handleDeleteMessage = useCallback(
+    (message: ChatMessage) => {
+      if (!chatId) return;
+      setPendingMessages((prev) => prev.filter((m) => m.id !== message.id));
+      setRevealedWarnings((prev) => {
+        if (!prev[message.id]) return prev;
+        const next = { ...prev };
+        delete next[message.id];
+        return next;
+      });
+      if (message.id.startsWith('local-')) return;
+      deleteDoc(doc(db, 'chats', chatId, 'messages', message.id)).catch(() => {});
+      if (message.imagePath) {
+        deleteObject(ref(storage, message.imagePath)).catch(() => {});
+      }
+    },
+    [chatId]
+  );
+
+  const handlePressImageMessage = (message: ChatMessage) => {
+    if (!message.image) return;
+    if (message.moderationStatus === 'pending') {
+      Alert.alert('Contenuto in verifica', 'L\'immagine è in analisi. Riprova tra poco.');
+      return;
+    }
+    const isFlagged =
+      message.moderationStatus === 'flagged' && message.contentWarning === 'nudity';
+    const isHidden = isFlagged && !revealedWarnings[message.id];
+    if (isHidden) {
+      Alert.alert(
+        'Contenuto sensibile',
+        'Questa immagine potrebbe contenere nudità. Vuoi vederla?',
+        [
+          { text: 'Annulla', style: 'cancel' },
+          { text: 'Elimina', style: 'destructive', onPress: () => handleDeleteMessage(message) },
+          {
+            text: 'OK',
+            onPress: () => {
+              setRevealedWarnings((prev) => ({ ...prev, [message.id]: true }));
+              handleOpenImageMessage(message);
+            },
+          },
+        ]
+      );
+      return;
+    }
+    handleOpenImageMessage(message);
+  };
+
   useEffect(() => {
     return () => {
       if (recordingRef.current) {
@@ -1240,6 +1317,11 @@ export default function ChatScreen() {
     const isEphemeralImage = isEphemeral && !!item.image;
     const isLockedImage =
       isEphemeralImage && !item.expiresAt && !expiryStartedRef.current.has(item.id);
+    const isModerationPending = item.moderationStatus === 'pending';
+    const isFlagged =
+      item.moderationStatus === 'flagged' && item.contentWarning === 'nudity';
+    const isHiddenByWarning = isFlagged && !revealedWarnings[item.id];
+    const showSensitiveOverlay = isModerationPending || isHiddenByWarning;
     const isFading = !!fadingMap[item.id];
     const createdAtMs =
       item.createdAt instanceof Date
@@ -1520,17 +1602,35 @@ export default function ChatScreen() {
             {item.image ? (
               <Pressable
                 style={styles.imageWrapper}
-                onPress={() => handleOpenImageMessage(item)}
+                onPress={() => handlePressImageMessage(item)}
                 disabled={isPendingImage}
               >
                 <Image
                   source={{ uri: item.image }}
-                  style={[styles.chatImage, isLockedImage && styles.chatImageLocked]}
+                  style={[
+                    styles.chatImage,
+                    (isLockedImage || showSensitiveOverlay) && styles.chatImageLocked,
+                  ]}
                   contentFit="cover"
                   cachePolicy="memory-disk"
-                  blurRadius={isLockedImage ? 20 : 0}
+                  blurRadius={isLockedImage || showSensitiveOverlay ? 20 : 0}
                 />
-                {isLockedImage ? (
+                {showSensitiveOverlay ? (
+                  <View style={styles.imageWarningOverlay}>
+                    <View style={styles.imageWarningBadge}>
+                      <Ionicons
+                        name={isModerationPending ? 'time-outline' : 'warning-outline'}
+                        size={18}
+                        color="#fff"
+                      />
+                    </View>
+                    <Text style={styles.imageWarningText}>
+                      {isModerationPending
+                        ? 'Contenuto in verifica'
+                        : 'Contenuto sensibile - tocca per vedere'}
+                    </Text>
+                  </View>
+                ) : isLockedImage ? (
                   <View style={styles.imageLockOverlay}>
                     <View style={styles.imageLockBadge}>
                       <Ionicons name="eye-off-outline" size={18} color="#fff" />
@@ -2429,6 +2529,30 @@ const styles = StyleSheet.create({
   },
   chatImageLocked: {
     opacity: 0.2,
+  },
+  imageWarningOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+    gap: 10,
+  },
+  imageWarningBadge: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  imageWarningText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   imageLockOverlay: {
     ...StyleSheet.absoluteFillObject,

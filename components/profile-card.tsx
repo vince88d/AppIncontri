@@ -18,6 +18,10 @@ export function ProfileCard({ profile, onLike, onPass }: Props) {
   const colorScheme = useColorScheme();
   const palette = Colors[colorScheme ?? 'light'];
   const photoUri = profile.photo || profile.photos?.[0] || FALLBACK_PHOTO;
+  const photoIndex = profile.photos?.findIndex((p) => p === photoUri) ?? 0;
+  const photoMeta = profile.photoMeta?.[photoIndex];
+  const isFlagged =
+    photoMeta?.moderationStatus === 'flagged' && photoMeta?.contentWarning === 'nudity';
 
   return (
     <View
@@ -41,7 +45,16 @@ export function ProfileCard({ profile, onLike, onPass }: Props) {
           contentFit="cover"
           transition={200}
           cachePolicy="memory-disk"
+          blurRadius={isFlagged ? 20 : 0}
         />
+        {isFlagged ? (
+          <View style={styles.photoWarningOverlay}>
+            <View style={styles.photoWarningBadge}>
+              <Ionicons name="warning-outline" size={18} color="#fff" />
+            </View>
+            <Text style={styles.photoWarningText}>Foto segnalata</Text>
+          </View>
+        ) : null}
         <View style={styles.photoOverlay}>
           <Text style={styles.name}>
             {profile.name}, {profile.age}
@@ -125,6 +138,30 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 12,
     backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  photoWarningOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+  },
+  photoWarningBadge: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  photoWarningText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   name: {
     color: '#fff',

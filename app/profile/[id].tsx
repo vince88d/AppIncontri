@@ -23,6 +23,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/hooks/use-auth';
 import { db } from '@/lib/firebase';
+import type { PhotoMeta } from '@/lib/moderation';
+import { uploadImageToStorage } from '@/lib/storage';
 
 type Profile = {
   id: string;
@@ -32,6 +34,7 @@ type Profile = {
   distanceKm: number;
   photo: string;
   photos?: string[];
+  photoMeta?: PhotoMeta[];
   interests: string[];
   role?: string;
   intent?: string;
@@ -65,9 +68,11 @@ export default function ProfileDetailScreen() {
   const [bio, setBio] = useState('');
   const [jobTitle, setJobTitle] = useState('');
   const [photos, setPhotos] = useState<string[]>([]);
+  const [photoMeta, setPhotoMeta] = useState<PhotoMeta[]>([]);
   const [role, setRole] = useState('');
   const [intent, setIntent] = useState('');
   const [userInterests, setUserInterests] = useState<string[]>([]);
+  const [revealedPhotos, setRevealedPhotos] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let active = true;
@@ -84,7 +89,15 @@ export default function ProfileDetailScreen() {
           setCity(data.city ?? '');
           setBio(data.bio ?? '');
           setJobTitle(data.jobTitle ?? '');
-          setPhotos(data.photos ?? (data.photo ? [data.photo] : []));
+            const nextPhotos = data.photos ?? (data.photo ? [data.photo] : []);
+            setPhotos(nextPhotos);
+            const nextMeta = Array.isArray(data.photoMeta)
+              ? data.photoMeta.slice(0, nextPhotos.length)
+              : [];
+            while (nextMeta.length < nextPhotos.length) {
+              nextMeta.push({});
+            }
+            setPhotoMeta(nextMeta);
           setRole(data.role ?? '');
           setIntent(data.intent ?? '');
           setUserInterests(Array.isArray(data.interests) ? data.interests : []);
@@ -232,19 +245,31 @@ export default function ProfileDetailScreen() {
           return a.uri;
         })
         .filter(Boolean);
-      setPhotos((prev) => {
-        const merged = [...prev, ...uris];
-        const seen = new Set<string>();
-        const unique = [];
-        for (const uri of merged) {
-          if (!seen.has(uri)) {
-            unique.push(uri);
-            seen.add(uri);
+        setPhotos((prev) => {
+          const merged = [...prev, ...uris];
+          const seen = new Set<string>();
+          const unique: string[] = [];
+          for (const uri of merged) {
+            if (!seen.has(uri)) {
+              unique.push(uri);
+              seen.add(uri);
+            }
+            if (unique.length >= 10) break;
           }
-          if (unique.length >= 10) break;
-        }
-        return unique;
-      });
+          setPhotoMeta((prevMeta) => {
+            const nextMeta: PhotoMeta[] = [];
+            unique.forEach((uri) => {
+              const existingIndex = prev.findIndex((p) => p === uri);
+              if (existingIndex >= 0 && prevMeta[existingIndex]) {
+                nextMeta.push(prevMeta[existingIndex]);
+              } else {
+                nextMeta.push({ moderationStatus: 'pending', contentWarning: null });
+              }
+            });
+            return nextMeta;
+          });
+          return unique;
+        });
     }
   };
 
@@ -255,29 +280,66 @@ export default function ProfileDetailScreen() {
     }
     
     const ageNum = Number(age);
-    if (!name.trim() || Number.isNaN(ageNum) || ageNum < 18 || ageNum > 100) {
-      Alert.alert('Controlla i campi', 'Inserisci nome e una età valida (18-100).');
-      return;
-    }
-    
-    setSaving(true);
-    try {
-      await updateDoc(doc(db, 'profiles', profile.id), {
-        name: name.trim(),
-        age: ageNum,
-        city: city.trim(),
-        bio: bio.trim(),
-        jobTitle: jobTitle.trim(),
-        photo: photos[0] ?? profile.photo ?? '',
-        photos,
-        role: role.trim(),
-        intent: intent.trim(),
-        interests: userInterests,
-      });
-      setIsEditing(false);
-      Alert.alert('Salvato!', 'Profilo aggiornato con successo!');
-    } catch (e) {
-      Alert.alert('Errore', 'Non sono riuscito a salvare. Riprova.');
+      if (!name.trim() || Number.isNaN(ageNum) || ageNum < 18 || ageNum > 100) {
+        Alert.alert('Controlla i campi', 'Inserisci nome e una età valida (18-100).');
+        return;
+      }
+      
+      setSaving(true);
+      try {
+        const nextPhotos: string[] = [];
+        const nextMeta: PhotoMeta[] = [];
+        for (let i = 0; i < photos.length; i += 1) {
+          const uri = photos[i];
+          const existingMeta = photoMeta[i];
+          if (uri.startsWith('http')) {
+            nextPhotos.push(uri);
+            nextMeta.push(existingMeta ?? {});
+            continue;
+          }
+          const path = `profile-images/${profile.id}/${Date.now()}-${i}`;
+          const { url, path: storedPath } = await uploadImageToStorage({
+            uri,
+            path,
+            metadata: {
+              kind: 'profile',
+              profileId: profile.id,
+              photoIndex: String(i),
+            },
+          });
+          nextPhotos.push(url);
+          nextMeta.push({ path: storedPath, moderationStatus: 'pending', contentWarning: null });
+        }
+
+        await updateDoc(doc(db, 'profiles', profile.id), {
+          name: name.trim(),
+          age: ageNum,
+          city: city.trim(),
+          bio: bio.trim(),
+          jobTitle: jobTitle.trim(),
+          photo: nextPhotos[0] ?? profile.photo ?? '',
+          photos: nextPhotos,
+          photoMeta: nextMeta,
+          role: role.trim(),
+          intent: intent.trim(),
+          interests: userInterests,
+        });
+        setPhotos(nextPhotos);
+        setPhotoMeta(nextMeta);
+        setProfile((prev) =>
+          prev
+            ? {
+                ...prev,
+                photo: nextPhotos[0] ?? prev.photo,
+                photos: nextPhotos,
+                photoMeta: nextMeta,
+              }
+            : prev
+        );
+        setIsEditing(false);
+        Alert.alert('Salvato!', 'Profilo aggiornato con successo!');
+      } catch (e) {
+        Alert.alert('Errore', 'Non sono riuscito a salvare. Riprova.');
     } finally {
       setSaving(false);
     }
@@ -291,26 +353,67 @@ export default function ProfileDetailScreen() {
       {
         text: 'Elimina',
         style: 'destructive',
-        onPress: () => {
-          setPhotos((prev) => {
-            const next = prev.filter((p) => p !== uri);
-            // Se abbiamo rimosso la principale, la nuova principale sarà la prima rimasta
-            return next;
-          });
+          onPress: () => {
+            setPhotos((prev) => {
+              const next = prev.filter((p) => p !== uri);
+              // Se abbiamo rimosso la principale, la nuova principale sarà la prima rimasta
+              setPhotoMeta((prevMeta) => {
+                const nextMeta: PhotoMeta[] = [];
+                prev.forEach((photoUri, idx) => {
+                  if (photoUri !== uri) {
+                    nextMeta.push(prevMeta[idx] ?? {});
+                  }
+                });
+                return nextMeta;
+              });
+              return next;
+            });
+          },
         },
-      },
-    ]);
+      ]);
   };
 
   const handleSetPrimaryPhoto = (uri: string) => {
     if (!isOwner || !isEditing) return;
     setPhotos((prev) => {
       const filtered = prev.filter((p) => p !== uri);
+      setPhotoMeta((prevMeta) => {
+        const idx = prev.findIndex((p) => p === uri);
+        if (idx < 0) return prevMeta;
+        const primaryMeta = prevMeta[idx] ?? {};
+        const remainingMeta = prevMeta.filter((_, index) => index !== idx);
+        return [primaryMeta, ...remainingMeta];
+      });
       return [uri, ...filtered];
     });
   };
 
-  const handleOpenPhoto = (uri: string) => {
+  const handleOpenPhoto = (uri: string, meta?: PhotoMeta) => {
+    const isPending = meta?.moderationStatus === 'pending';
+    if (isPending) {
+      Alert.alert('Contenuto in verifica', 'L\'immagine è in analisi. Riprova tra poco.');
+      return;
+    }
+    const isFlagged =
+      meta?.moderationStatus === 'flagged' && meta?.contentWarning === 'nudity';
+    if (isFlagged && !revealedPhotos[uri]) {
+      Alert.alert(
+        'Contenuto sensibile',
+        'Questa foto potrebbe contenere nudità. Vuoi vederla?',
+        [
+          { text: 'Annulla', style: 'cancel' },
+          {
+            text: 'OK',
+            onPress: () => {
+              setRevealedPhotos((prev) => ({ ...prev, [uri]: true }));
+              setViewPhoto(uri);
+              setViewPhotoVisible(true);
+            },
+          },
+        ]
+      );
+      return;
+    }
     setViewPhoto(uri);
     setViewPhotoVisible(true);
   };
@@ -359,17 +462,25 @@ export default function ProfileDetailScreen() {
 
   const handleCancelEdit = () => {
     // Ripristina i valori originali
-    if (profile) {
-      setName(profile.name ?? '');
-      setAge(profile.age ? String(profile.age) : '');
-      setCity(profile.city ?? '');
-      setBio(profile.bio ?? '');
-      setJobTitle(profile.jobTitle ?? '');
-      setPhotos(profile.photos ?? (profile.photo ? [profile.photo] : []));
-      setRole(profile.role ?? '');
-      setIntent(profile.intent ?? '');
-      setUserInterests(profile.interests ?? []);
-    }
+      if (profile) {
+        setName(profile.name ?? '');
+        setAge(profile.age ? String(profile.age) : '');
+        setCity(profile.city ?? '');
+        setBio(profile.bio ?? '');
+        setJobTitle(profile.jobTitle ?? '');
+        const resetPhotos = profile.photos ?? (profile.photo ? [profile.photo] : []);
+        setPhotos(resetPhotos);
+        const resetMeta = Array.isArray(profile.photoMeta)
+          ? profile.photoMeta.slice(0, resetPhotos.length)
+          : [];
+        while (resetMeta.length < resetPhotos.length) {
+          resetMeta.push({});
+        }
+        setPhotoMeta(resetMeta);
+        setRole(profile.role ?? '');
+        setIntent(profile.intent ?? '');
+        setUserInterests(profile.interests ?? []);
+      }
     setIsEditing(false);
   };
 
@@ -400,6 +511,12 @@ export default function ProfileDetailScreen() {
   const galleryPhotos =
     photos.length > 0 ? photos : profile.photo ? [profile.photo] : [];
   const primaryPhotoUri = galleryPhotos[0] ?? FALLBACK_PHOTO;
+  const galleryMeta = galleryPhotos.map((_, index) => photoMeta[index] ?? {});
+  const primaryMeta = galleryMeta[0];
+  const isPrimaryPending = primaryMeta?.moderationStatus === 'pending';
+  const isPrimaryFlagged =
+    primaryMeta?.moderationStatus === 'flagged' && primaryMeta?.contentWarning === 'nudity';
+  const isPrimaryHidden = isPrimaryFlagged && !revealedPhotos[primaryPhotoUri];
 
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: palette.background }]} edges={['top']}>
@@ -441,14 +558,34 @@ export default function ProfileDetailScreen() {
       >
         {/* Hero Section */}
         <View style={styles.heroContainer}>
-          <Image
-            source={{ uri: primaryPhotoUri }}
-            style={styles.heroImage}
-            contentFit="cover"
-            transition={200}
-            cachePolicy="memory-disk"
-          />
-          <View style={styles.heroOverlay} />
+          <Pressable
+            style={styles.heroPressable}
+            onPress={() => handleOpenPhoto(primaryPhotoUri, primaryMeta)}
+          >
+            <Image
+              source={{ uri: primaryPhotoUri }}
+              style={styles.heroImage}
+              contentFit="cover"
+              transition={200}
+              cachePolicy="memory-disk"
+              blurRadius={isPrimaryPending || isPrimaryHidden ? 20 : 0}
+            />
+            <View style={styles.heroOverlay} />
+            {isPrimaryPending || isPrimaryHidden ? (
+              <View style={styles.photoWarningOverlay}>
+                <View style={styles.photoWarningBadge}>
+                  <Ionicons
+                    name={isPrimaryPending ? 'time-outline' : 'warning-outline'}
+                    size={20}
+                    color="#fff"
+                  />
+                </View>
+                <Text style={styles.photoWarningText}>
+                  {isPrimaryPending ? 'Contenuto in verifica' : 'Foto segnalata'}
+                </Text>
+              </View>
+            ) : null}
+          </Pressable>
           <View style={styles.heroContent}>
             <View style={styles.heroTextContainer}>
               <Text style={styles.heroName}>
@@ -497,45 +634,67 @@ export default function ProfileDetailScreen() {
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.photosStrip}
             >
-              {galleryPhotos.map((uri, index) => (
-                <Pressable
-                  key={uri}
-                  style={styles.photoContainer}
-                  onPress={() => handleOpenPhoto(uri)}
-                >
-                  <Image
-                    source={{ uri: uri || primaryPhotoUri }}
-                    style={styles.photo}
-                    contentFit="cover"
-                    cachePolicy="memory-disk"
-                  />
-                  {isOwner && isEditing && (
-                    <>
-                      <Pressable
-                        style={styles.removePhotoButton}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          handleRemovePhoto(uri);
-                        }}
-                      >
-                        <Ionicons name="close" size={16} color="#fff" />
-                      </Pressable>
-                      {index > 0 && (
+              {galleryPhotos.map((uri, index) => {
+                const meta = galleryMeta[index];
+                const isPending = meta?.moderationStatus === 'pending';
+                const isFlagged =
+                  meta?.moderationStatus === 'flagged' && meta?.contentWarning === 'nudity';
+                const isHidden = isFlagged && !revealedPhotos[uri];
+                return (
+                  <Pressable
+                    key={uri}
+                    style={styles.photoContainer}
+                    onPress={() => handleOpenPhoto(uri, meta)}
+                  >
+                    <Image
+                      source={{ uri: uri || primaryPhotoUri }}
+                      style={styles.photo}
+                      contentFit="cover"
+                      cachePolicy="memory-disk"
+                      blurRadius={isPending || isHidden ? 20 : 0}
+                    />
+                    {isPending || isHidden ? (
+                      <View style={styles.photoWarningOverlay}>
+                        <View style={styles.photoWarningBadge}>
+                          <Ionicons
+                            name={isPending ? 'time-outline' : 'warning-outline'}
+                            size={18}
+                            color="#fff"
+                          />
+                        </View>
+                        <Text style={styles.photoWarningText}>
+                          {isPending ? 'Contenuto in verifica' : 'Foto segnalata'}
+                        </Text>
+                      </View>
+                    ) : null}
+                    {isOwner && isEditing && (
+                      <>
                         <Pressable
-                          style={styles.setPrimaryButton}
+                          style={styles.removePhotoButton}
                           onPress={(e) => {
                             e.stopPropagation();
-                            handleSetPrimaryPhoto(uri);
+                            handleRemovePhoto(uri);
                           }}
                         >
-                          <Ionicons name="star" size={14} color="#fff" />
-                          <Text style={styles.setPrimaryText}>Principale</Text>
+                          <Ionicons name="close" size={16} color="#fff" />
                         </Pressable>
-                      )}
-                    </>
-                  )}
-                </Pressable>
-              ))}
+                        {index > 0 && (
+                          <Pressable
+                            style={styles.setPrimaryButton}
+                            onPress={(e) => {
+                              e.stopPropagation();
+                              handleSetPrimaryPhoto(uri);
+                            }}
+                          >
+                            <Ionicons name="star" size={14} color="#fff" />
+                            <Text style={styles.setPrimaryText}>Principale</Text>
+                          </Pressable>
+                        )}
+                      </>
+                    )}
+                  </Pressable>
+                );
+              })}
             </ScrollView>
           ) : (
             <View style={styles.emptyPhotos}>
@@ -962,6 +1121,9 @@ const styles = StyleSheet.create({
     height: 320,
     position: 'relative',
   },
+  heroPressable: {
+    ...StyleSheet.absoluteFillObject,
+  },
   heroImage: {
     width: '100%',
     height: '100%',
@@ -976,6 +1138,30 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     padding: 24,
+  },
+  photoWarningOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingHorizontal: 16,
+  },
+  photoWarningBadge: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  photoWarningText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
   },
   heroTextContainer: {
     gap: 8,

@@ -19,6 +19,7 @@ import { doc, setDoc } from 'firebase/firestore';
 import { Colors } from '@/constants/theme';
 import { auth, db } from '@/lib/firebase';
 import { useAuth } from '@/hooks/use-auth';
+import { uploadImageToStorage } from '@/lib/storage';
 
 const FALLBACK_PHOTO =
   'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=900&q=80';
@@ -35,6 +36,42 @@ export default function ProfileSetupScreen() {
   const [photos, setPhotos] = useState<string[]>([FALLBACK_PHOTO]);
   const [bio, setBio] = useState('');
 
+  const uploadProfilePhotos = async () => {
+    if (!user) return { urls: [FALLBACK_PHOTO], meta: [] };
+    const selected = photos.filter((uri) => uri && uri !== FALLBACK_PHOTO);
+    if (!selected.length) {
+      return { urls: [FALLBACK_PHOTO], meta: [] };
+    }
+
+    const uploads = [];
+    for (let i = 0; i < selected.length; i += 1) {
+      const uri = selected[i];
+      if (uri.startsWith('http')) {
+        uploads.push({ url: uri, path: '' });
+        continue;
+      }
+      const path = `profile-images/${user.uid}/${Date.now()}-${i}`;
+      const { url, path: storedPath } = await uploadImageToStorage({
+        uri,
+        path,
+        metadata: {
+          kind: 'profile',
+          profileId: user.uid,
+          photoIndex: String(i),
+        },
+      });
+      uploads.push({ url, path: storedPath });
+    }
+
+    const urls = uploads.map((item) => item.url);
+    const meta = uploads.map((item) =>
+      item.path
+        ? { path: item.path, moderationStatus: 'pending', contentWarning: null }
+        : {}
+    );
+    return { urls, meta };
+  };
+
   useEffect(() => {
     if (!user) {
       router.replace('/auth');
@@ -50,13 +87,15 @@ export default function ProfileSetupScreen() {
     }
     setLoading(true);
     try {
+      const { urls, meta } = await uploadProfilePhotos();
       await setDoc(doc(db, 'profiles', user.uid), {
         name: name.trim(),
         age: ageNum,
         city: city.trim() || 'N/D',
         distanceKm: 0, // calcoleremo via GPS più avanti
-        photo: photos[0] ?? FALLBACK_PHOTO,
-        photos,
+        photo: urls[0] ?? FALLBACK_PHOTO,
+        photos: urls.length ? urls : [FALLBACK_PHOTO],
+        photoMeta: meta,
         interests: [],
         bio: bio.trim(),
         jobTitle: '',
