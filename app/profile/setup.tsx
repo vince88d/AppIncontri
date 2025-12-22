@@ -121,6 +121,7 @@ export default function ProfileSetupScreen() {
       allowsMultipleSelection: true,
       selectionLimit: 3,
       base64: Platform.OS === 'web',
+      copyToCacheDirectory: true,
     });
     if (!result.canceled) {
       const uris = result.assets.map((a) => {

@@ -25,21 +25,25 @@ export default function RootLayout() {
         // Best-effort: some platforms do not allow full prevention.
       }
 
-      subscription = ScreenCapture.addScreenshotListener(() => {
-        const now = Date.now();
-        if (now - lastAlertAt.current < 2000) {
-          return;
-        }
-        lastAlertAt.current = now;
-        Alert.alert('Impossibile fare screenshot');
-      });
+      try {
+        subscription = ScreenCapture.addScreenshotListener(() => {
+          const now = Date.now();
+          if (now - lastAlertAt.current < 2000) {
+            return;
+          }
+          lastAlertAt.current = now;
+          Alert.alert('Impossibile fare screenshot');
+        });
+      } catch {
+        // Best-effort: not all runtimes expose screenshot events.
+      }
     };
 
     void enableScreenCaptureProtection();
 
     return () => {
       subscription?.remove();
-      void ScreenCapture.allowScreenCaptureAsync();
+      void ScreenCapture.allowScreenCaptureAsync().catch(() => {});
     };
   }, []);
 

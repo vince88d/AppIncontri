@@ -6,7 +6,7 @@ admin.initializeApp();
 
 const db = admin.firestore();
 const visionClient = new vision.ImageAnnotatorClient();
-const NUDITY_LEVELS = new Set(['LIKELY', 'VERY_LIKELY']);
+const NUDITY_LEVELS = new Set(['POSSIBLE', 'LIKELY', 'VERY_LIKELY']);
 
 const isNudity = (safeSearch) => {
   if (!safeSearch) return false;

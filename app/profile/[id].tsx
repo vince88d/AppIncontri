@@ -226,14 +226,15 @@ export default function ProfileDetailScreen() {
       return;
     }
     
-    const result = await ImagePicker.launchImageLibraryAsync({
-      allowsEditing: true,
-      aspect: [3, 4],
-      quality: 0.8,
-      allowsMultipleSelection: true,
-      selectionLimit: 3,
-      base64: Platform.OS === 'web',
-    });
+      const result = await ImagePicker.launchImageLibraryAsync({
+        allowsEditing: true,
+        aspect: [3, 4],
+        quality: 0.8,
+        allowsMultipleSelection: true,
+        selectionLimit: 3,
+        base64: Platform.OS === 'web',
+        copyToCacheDirectory: true,
+      });
     
     if (!result.canceled) {
       const uris = result.assets
