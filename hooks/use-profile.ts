@@ -2,8 +2,6 @@ import { doc, getDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 
 import { db } from '@/lib/firebase';
-import type { PhotoMeta } from '@/lib/moderation';
-
 type Profile = {
   id: string;
   name: string;
@@ -14,7 +12,6 @@ type Profile = {
   interests: string[];
   bio?: string;
   jobTitle?: string;
-  photoMeta?: PhotoMeta[];
 };
 
 export function useProfile(profileId?: string | null) {

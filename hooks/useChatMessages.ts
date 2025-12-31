@@ -24,8 +24,7 @@ type ChatMessage = {
   createdAt?: Timestamp | Date;
   image?: string;
   imagePath?: string;
-  moderationStatus?: 'pending' | 'ok' | 'flagged';
-  contentWarning?: 'nudity' | null;
+  sensitive?: boolean;
   audio?: string;
   audioDuration?: number;
   expiresAfterView?: boolean;
@@ -37,6 +36,10 @@ type ChatMessage = {
 };
 
 const INITIAL_MESSAGES_LIMIT = 30;
+
+type SendMessageOptions = {
+  messageId?: string;
+};
 
 export function useChatMessages(chatId: string | null, otherId: string, otherName?: string, otherPhoto?: string) {
   const { user } = useAuth();
@@ -93,28 +96,37 @@ export function useChatMessages(chatId: string | null, otherId: string, otherNam
 
   const handleSendMessage = useCallback(async (
     messageData: Partial<ChatMessage>,
-    isSecret: boolean
+    isSecret: boolean,
+    options?: SendMessageOptions
   ) => {
     if (!chatId || !user?.uid) return;
 
     setSending(true);
-    const tempId = `local-${Date.now()}`;
+    const normalizedMessage: Partial<ChatMessage> = { ...messageData };
+    const tempIdPrefix = normalizedMessage.image
+      ? 'local-img'
+      : normalizedMessage.audio
+      ? 'local-audio'
+      : normalizedMessage.location
+      ? 'local-location'
+      : 'local';
+    const tempId = `${tempIdPrefix}-${Date.now()}`;
     const optimisticMsg: ChatMessage = {
       id: tempId,
       senderId: user.uid,
       createdAt: new Date(),
       expiresAfterView: isSecret,
-      ...messageData,
+      ...normalizedMessage,
     };
 
     setPendingMessages((prev) => [...prev, optimisticMsg]);
 
     try {
       let lastMessageText = '[Messaggio]';
-      if (messageData.text) lastMessageText = messageData.text;
-      if (messageData.image) lastMessageText = '[Foto]';
-      if (messageData.audio) lastMessageText = '[Audio]';
-      if (messageData.location) lastMessageText = '[Posizione]';
+      if (normalizedMessage.text) lastMessageText = normalizedMessage.text;
+      if (normalizedMessage.image) lastMessageText = '[Foto]';
+      if (normalizedMessage.audio) lastMessageText = '[Audio]';
+      if (normalizedMessage.location) lastMessageText = '[Posizione]';
 
       await setDoc(
         doc(db, 'chats', chatId),
@@ -134,12 +146,22 @@ export function useChatMessages(chatId: string | null, otherId: string, otherNam
         { merge: true }
       );
 
-      await addDoc(collection(db, 'chats', chatId, 'messages'), {
-        ...messageData,
+      const messagePayload = {
+        ...normalizedMessage,
         senderId: user.uid,
         createdAt: serverTimestamp(),
         expiresAfterView: isSecret,
-      });
+      };
+
+      if (options?.messageId) {
+        await setDoc(
+          doc(db, 'chats', chatId, 'messages', options.messageId),
+          { id: options.messageId, ...messagePayload },
+          { merge: true }
+        );
+      } else {
+        await addDoc(collection(db, 'chats', chatId, 'messages'), messagePayload);
+      }
       
     } catch (e) {
       Alert.alert('Errore', 'Impossibile inviare il messaggio.');

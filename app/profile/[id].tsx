@@ -2,7 +2,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { router, useLocalSearchParams } from 'expo-router';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
+import { arrayRemove, arrayUnion, doc, getDoc, serverTimestamp, updateDoc } from 'firebase/firestore';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
@@ -18,12 +18,11 @@ import {
   useColorScheme,
   Platform,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/hooks/use-auth';
 import { db } from '@/lib/firebase';
-import type { PhotoMeta } from '@/lib/moderation';
 import { uploadImageToStorage } from '@/lib/storage';
 
 type Profile = {
@@ -34,7 +33,6 @@ type Profile = {
   distanceKm: number;
   photo: string;
   photos?: string[];
-  photoMeta?: PhotoMeta[];
   interests: string[];
   role?: string;
   intent?: string;
@@ -46,11 +44,22 @@ type Profile = {
 
 const FALLBACK_PHOTO =
   'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=900&q=80';
+const TAP_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+const timestampToMs = (value: any) => {
+  if (!value) return null;
+  if (typeof value === 'number') return value;
+  if (value.toMillis) return value.toMillis();
+  if (value.toDate) return value.toDate().getTime();
+  if (typeof value.seconds === 'number') return value.seconds * 1000;
+  return null;
+};
 
 export default function ProfileDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const colorScheme = useColorScheme();
   const palette = Colors[colorScheme ?? 'light'];
+  const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,6 +70,11 @@ export default function ProfileDetailScreen() {
   const [viewPhotoVisible, setViewPhotoVisible] = useState(false);
   const [myBlocked, setMyBlocked] = useState<string[]>([]);
   const [myBlockedBy, setMyBlockedBy] = useState<string[]>([]);
+  const [myFavorites, setMyFavorites] = useState<string[]>([]);
+  const [myInterested, setMyInterested] = useState<string[]>([]);
+  const [tapCooldowns, setTapCooldowns] = useState<Record<string, any>>({});
+  const [updatingFavorite, setUpdatingFavorite] = useState(false);
+  const [updatingInterest, setUpdatingInterest] = useState(false);
 
   const [name, setName] = useState('');
   const [age, setAge] = useState('');
@@ -68,11 +82,9 @@ export default function ProfileDetailScreen() {
   const [bio, setBio] = useState('');
   const [jobTitle, setJobTitle] = useState('');
   const [photos, setPhotos] = useState<string[]>([]);
-  const [photoMeta, setPhotoMeta] = useState<PhotoMeta[]>([]);
   const [role, setRole] = useState('');
   const [intent, setIntent] = useState('');
   const [userInterests, setUserInterests] = useState<string[]>([]);
-  const [revealedPhotos, setRevealedPhotos] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
     let active = true;
@@ -91,13 +103,6 @@ export default function ProfileDetailScreen() {
           setJobTitle(data.jobTitle ?? '');
             const nextPhotos = data.photos ?? (data.photo ? [data.photo] : []);
             setPhotos(nextPhotos);
-            const nextMeta = Array.isArray(data.photoMeta)
-              ? data.photoMeta.slice(0, nextPhotos.length)
-              : [];
-            while (nextMeta.length < nextPhotos.length) {
-              nextMeta.push({});
-            }
-            setPhotoMeta(nextMeta);
           setRole(data.role ?? '');
           setIntent(data.intent ?? '');
           setUserInterests(Array.isArray(data.interests) ? data.interests : []);
@@ -123,6 +128,9 @@ export default function ProfileDetailScreen() {
       if (!user?.uid) {
         setMyBlocked([]);
         setMyBlockedBy([]);
+        setMyFavorites([]);
+        setMyInterested([]);
+        setTapCooldowns({});
         return;
       }
       try {
@@ -132,16 +140,27 @@ export default function ProfileDetailScreen() {
           const data = snap.data() as any;
           setMyBlocked(Array.isArray(data.blocked) ? data.blocked : []);
           setMyBlockedBy(Array.isArray(data.blockedBy) ? data.blockedBy : []);
+          setMyFavorites(Array.isArray(data.favorites) ? data.favorites : []);
+          setMyInterested(Array.isArray(data.interested) ? data.interested : []);
+          setTapCooldowns(
+            data.tapCooldowns && typeof data.tapCooldowns === 'object' ? data.tapCooldowns : {}
+          );
         } else {
           setMyBlocked([]);
           setMyBlockedBy([]);
+          setMyFavorites([]);
+          setMyInterested([]);
+          setTapCooldowns({});
         }
       } catch (e) {
         if (!active) return;
         setMyBlocked([]);
         setMyBlockedBy([]);
+        setMyFavorites([]);
+        setMyInterested([]);
+        setTapCooldowns({});
       }
-    })();
+      })();
     return () => {
       active = false;
     };
@@ -160,6 +179,26 @@ export default function ProfileDetailScreen() {
     const iAmBlockedBy = myBlockedBy.includes(profile.id);
     return blockedByTarget || targetSaysNo || iBlocked || iAmBlockedBy;
   }, [profile, user?.uid, isOwner, myBlocked, myBlockedBy]);
+  const isFavorite = useMemo(
+    () => !!profile?.id && myFavorites.includes(profile.id),
+    [profile?.id, myFavorites]
+  );
+  const isInterested = useMemo(
+    () => !!profile?.id && myInterested.includes(profile.id),
+    [profile?.id, myInterested]
+  );
+  const tapCooldownUntilMs = useMemo(() => {
+    if (!profile?.id) return null;
+    const lastTapMs = timestampToMs(tapCooldowns[profile.id]);
+    if (!lastTapMs) return null;
+    return lastTapMs + TAP_COOLDOWN_MS;
+  }, [profile?.id, tapCooldowns]);
+  const tapCooldownRemainingMs = tapCooldownUntilMs ? tapCooldownUntilMs - Date.now() : 0;
+  const isTapCooldownActive = !isOwner && tapCooldownRemainingMs > 0;
+  const tapCooldownHours =
+    tapCooldownRemainingMs > 0
+      ? Math.max(1, Math.ceil(tapCooldownRemainingMs / (60 * 60 * 1000)))
+      : 0;
   const hasUnsavedChanges = useMemo(() => {
     if (!profile) return false;
     const ageChanged = age.trim() !== String(profile.age ?? '');
@@ -200,6 +239,57 @@ export default function ProfileDetailScreen() {
     return [user.uid, profile.id].sort().join('_');
   }, [user?.uid, profile?.id]);
 
+  const handleToggleFavorite = async () => {
+    if (!user?.uid || !profile?.id || updatingFavorite) return;
+    const targetId = profile.id;
+    const nextValue = !isFavorite;
+    setUpdatingFavorite(true);
+    setMyFavorites((prev) =>
+      nextValue ? [...prev, targetId] : prev.filter((id) => id !== targetId)
+    );
+    try {
+      await updateDoc(doc(db, 'profiles', user.uid), {
+        favorites: nextValue ? arrayUnion(targetId) : arrayRemove(targetId),
+      });
+    } catch (e) {
+      setMyFavorites((prev) =>
+        nextValue ? prev.filter((id) => id !== targetId) : [...prev, targetId]
+      );
+      Alert.alert('Errore', 'Non sono riuscito ad aggiornare i preferiti.');
+    } finally {
+      setUpdatingFavorite(false);
+    }
+  };
+
+  const handleToggleInterest = async () => {
+    if (!user?.uid || !profile?.id || updatingInterest) return;
+    if (isTapCooldownActive) {
+      Alert.alert('Attendi', `Puoi inviare un altro tap tra ${tapCooldownHours}h.`);
+      return;
+    }
+    if (isInterested) {
+      Alert.alert('Tap già inviato', 'Hai già inviato un tap a questo profilo.');
+      return;
+    }
+    const targetId = profile.id;
+    setUpdatingInterest(true);
+    setMyInterested((prev) => (prev.includes(targetId) ? prev : [...prev, targetId]));
+    try {
+      await updateDoc(doc(db, 'profiles', user.uid), {
+        interested: arrayUnion(targetId),
+        [`tapCooldowns.${targetId}`]: serverTimestamp(),
+      });
+      await updateDoc(doc(db, 'profiles', targetId), {
+        interestedBy: arrayUnion(user.uid),
+      });
+    } catch (e) {
+      setMyInterested((prev) => prev.filter((id) => id !== targetId));
+      Alert.alert('Errore', 'Non sono riuscito a inviare il tap.');
+    } finally {
+      setUpdatingInterest(false);
+    }
+  };
+
   const roleOptions = ['Top', 'Vers', 'Bottom', 'NS'];
   const intentOptions = ['Relazione', 'Amicizia', 'Dating'];
   const interestOptions = [
@@ -213,6 +303,12 @@ export default function ProfileDetailScreen() {
     'Nature',
     'Gaming',
   ];
+  const roleIconMap: Record<string, keyof typeof Ionicons.glyphMap> = {
+    Top: 'arrow-up',
+    Vers: 'swap-vertical',
+    Bottom: 'arrow-down',
+    NS: 'help-circle-outline',
+  };
 
   const handlePickImage = async () => {
     if (!isOwner || !isEditing) {
@@ -257,18 +353,6 @@ export default function ProfileDetailScreen() {
             }
             if (unique.length >= 10) break;
           }
-          setPhotoMeta((prevMeta) => {
-            const nextMeta: PhotoMeta[] = [];
-            unique.forEach((uri) => {
-              const existingIndex = prev.findIndex((p) => p === uri);
-              if (existingIndex >= 0 && prevMeta[existingIndex]) {
-                nextMeta.push(prevMeta[existingIndex]);
-              } else {
-                nextMeta.push({ moderationStatus: 'pending', contentWarning: null });
-              }
-            });
-            return nextMeta;
-          });
           return unique;
         });
     }
@@ -288,28 +372,36 @@ export default function ProfileDetailScreen() {
       
       setSaving(true);
       try {
+        const sourcePhotos = photos.filter((uri) => !!uri && uri !== FALLBACK_PHOTO);
+        const resolvedPhotos = sourcePhotos.length ? sourcePhotos : [];
         const nextPhotos: string[] = [];
-        const nextMeta: PhotoMeta[] = [];
-        for (let i = 0; i < photos.length; i += 1) {
-          const uri = photos[i];
-          const existingMeta = photoMeta[i];
+        let skippedUploads = 0;
+        for (let i = 0; i < resolvedPhotos.length; i += 1) {
+          const uri = resolvedPhotos[i];
           if (uri.startsWith('http')) {
             nextPhotos.push(uri);
-            nextMeta.push(existingMeta ?? {});
+            continue;
+          }
+          if (Platform.OS === 'web' && (uri.startsWith('file://') || uri.startsWith('content://'))) {
+            skippedUploads += 1;
             continue;
           }
           const path = `profile-images/${profile.id}/${Date.now()}-${i}`;
-          const { url, path: storedPath } = await uploadImageToStorage({
-            uri,
-            path,
-            metadata: {
-              kind: 'profile',
-              profileId: profile.id,
-              photoIndex: String(i),
-            },
-          });
-          nextPhotos.push(url);
-          nextMeta.push({ path: storedPath, moderationStatus: 'pending', contentWarning: null });
+          try {
+            const { url } = await uploadImageToStorage({
+              uri,
+              path,
+              metadata: {
+                kind: 'profile',
+                profileId: profile.id,
+                photoIndex: String(i),
+              },
+            });
+            nextPhotos.push(url);
+          } catch (uploadError) {
+            console.error('Photo upload failed', uploadError);
+            skippedUploads += 1;
+          }
         }
 
         await updateDoc(doc(db, 'profiles', profile.id), {
@@ -318,29 +410,37 @@ export default function ProfileDetailScreen() {
           city: city.trim(),
           bio: bio.trim(),
           jobTitle: jobTitle.trim(),
-          photo: nextPhotos[0] ?? profile.photo ?? '',
+          photo: nextPhotos[0] ?? '',
           photos: nextPhotos,
-          photoMeta: nextMeta,
           role: role.trim(),
           intent: intent.trim(),
           interests: userInterests,
         });
         setPhotos(nextPhotos);
-        setPhotoMeta(nextMeta);
         setProfile((prev) =>
           prev
             ? {
                 ...prev,
                 photo: nextPhotos[0] ?? prev.photo,
                 photos: nextPhotos,
-                photoMeta: nextMeta,
               }
             : prev
         );
         setIsEditing(false);
-        Alert.alert('Salvato!', 'Profilo aggiornato con successo!');
+        if (skippedUploads > 0) {
+          Alert.alert(
+            'Salvato con avviso',
+            'Profilo aggiornato, ma alcune foto non sono state caricate.'
+          );
+        } else {
+          Alert.alert('Salvato!', 'Profilo aggiornato con successo!');
+        }
       } catch (e) {
-        Alert.alert('Errore', 'Non sono riuscito a salvare. Riprova.');
+        console.error('Save profile failed', e);
+        const raw = e as { message?: string; code?: string };
+        const detail = raw?.message ? ` ${raw.message}` : '';
+        const code = raw?.code ? ` (${raw.code})` : '';
+        Alert.alert('Errore', `Non sono riuscito a salvare${code}.${detail}`);
     } finally {
       setSaving(false);
     }
@@ -355,20 +455,7 @@ export default function ProfileDetailScreen() {
         text: 'Elimina',
         style: 'destructive',
           onPress: () => {
-            setPhotos((prev) => {
-              const next = prev.filter((p) => p !== uri);
-              // Se abbiamo rimosso la principale, la nuova principale sarà la prima rimasta
-              setPhotoMeta((prevMeta) => {
-                const nextMeta: PhotoMeta[] = [];
-                prev.forEach((photoUri, idx) => {
-                  if (photoUri !== uri) {
-                    nextMeta.push(prevMeta[idx] ?? {});
-                  }
-                });
-                return nextMeta;
-              });
-              return next;
-            });
+            setPhotos((prev) => prev.filter((p) => p !== uri));
           },
         },
       ]);
@@ -378,43 +465,12 @@ export default function ProfileDetailScreen() {
     if (!isOwner || !isEditing) return;
     setPhotos((prev) => {
       const filtered = prev.filter((p) => p !== uri);
-      setPhotoMeta((prevMeta) => {
-        const idx = prev.findIndex((p) => p === uri);
-        if (idx < 0) return prevMeta;
-        const primaryMeta = prevMeta[idx] ?? {};
-        const remainingMeta = prevMeta.filter((_, index) => index !== idx);
-        return [primaryMeta, ...remainingMeta];
-      });
       return [uri, ...filtered];
     });
   };
 
-  const handleOpenPhoto = (uri: string, meta?: PhotoMeta) => {
-    const isPending = meta?.moderationStatus === 'pending';
-    if (isPending) {
-      Alert.alert('Contenuto in verifica', 'L\'immagine è in analisi. Riprova tra poco.');
-      return;
-    }
-    const isFlagged =
-      meta?.moderationStatus === 'flagged' && meta?.contentWarning === 'nudity';
-    if (isFlagged && !revealedPhotos[uri]) {
-      Alert.alert(
-        'Contenuto sensibile',
-        'Questa foto potrebbe contenere nudità. Vuoi vederla?',
-        [
-          { text: 'Annulla', style: 'cancel' },
-          {
-            text: 'OK',
-            onPress: () => {
-              setRevealedPhotos((prev) => ({ ...prev, [uri]: true }));
-              setViewPhoto(uri);
-              setViewPhotoVisible(true);
-            },
-          },
-        ]
-      );
-      return;
-    }
+  const handleOpenPhoto = (uri: string) => {
+    if (!uri) return;
     setViewPhoto(uri);
     setViewPhotoVisible(true);
   };
@@ -471,13 +527,6 @@ export default function ProfileDetailScreen() {
         setJobTitle(profile.jobTitle ?? '');
         const resetPhotos = profile.photos ?? (profile.photo ? [profile.photo] : []);
         setPhotos(resetPhotos);
-        const resetMeta = Array.isArray(profile.photoMeta)
-          ? profile.photoMeta.slice(0, resetPhotos.length)
-          : [];
-        while (resetMeta.length < resetPhotos.length) {
-          resetMeta.push({});
-        }
-        setPhotoMeta(resetMeta);
         setRole(profile.role ?? '');
         setIntent(profile.intent ?? '');
         setUserInterests(profile.interests ?? []);
@@ -509,104 +558,148 @@ export default function ProfileDetailScreen() {
     );
   }
 
-  const galleryPhotos =
-    photos.length > 0 ? photos : profile.photo ? [profile.photo] : [];
-  const primaryPhotoUri = galleryPhotos[0] ?? FALLBACK_PHOTO;
-  const galleryMeta = galleryPhotos.map((_, index) => photoMeta[index] ?? {});
-  const primaryMeta = galleryMeta[0];
-  const isPrimaryPending = primaryMeta?.moderationStatus === 'pending';
-  const isPrimaryFlagged =
-    primaryMeta?.moderationStatus === 'flagged' && primaryMeta?.contentWarning === 'nudity';
-  const isPrimaryHidden = isPrimaryFlagged && !revealedPhotos[primaryPhotoUri];
+  const galleryPhotos = (photos.length > 0 ? photos : profile.photo ? [profile.photo] : [])
+    .filter((uri) => !!uri && uri !== FALLBACK_PHOTO)
+    .filter((uri) => {
+      if (Platform.OS !== 'web') return true;
+      return uri.startsWith('http') || uri.startsWith('data:');
+    });
+  const hasGalleryPhotos = galleryPhotos.length > 0;
+  const primaryPhotoUri = hasGalleryPhotos ? galleryPhotos[0] : '';
+
+  const showMessageButton = !isOwner && !isEditing;
+  const interestLabel = isInterested
+    ? 'Tap inviato'
+    : isTapCooldownActive
+    ? `Riprova tra ${tapCooldownHours}h`
+    : 'Interessato';
+  const isEditingView = isOwner && isEditing;
+  const displayCity = (isEditingView ? city : city || profile.city || '').trim();
+  const normalizedCity = displayCity.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const hasCity = !!displayCity && normalizedCity !== 'nd';
+  const displayJobTitle = (isEditingView ? jobTitle : jobTitle || profile.jobTitle || '').trim();
+  const hasJobTitle = !!displayJobTitle;
+  const displayRole = (isEditingView ? role : role || profile.role || '').trim();
+  const hasRole = !!displayRole;
+  const roleIconName = roleIconMap[displayRole];
+  const hasRoleIcon = !!roleIconName;
+  const displayIntent = (isEditingView ? intent : intent || profile.intent || '').trim();
+  const hasIntent = !!displayIntent;
+  const displayBio = (isEditingView ? bio : bio || profile.bio || '').trim();
+  const hasBio = !!displayBio;
+  const displayInterests = (userInterests.length ? userInterests : profile.interests || []).filter(
+    Boolean
+  );
+  const hasInterests = displayInterests.length > 0;
+  const showPreferencesSection = isEditingView || hasRole || hasIntent || hasInterests;
+  const showBioSection = isEditingView || hasBio;
+  const showHeroMeta = hasCity || hasJobTitle;
 
   return (
-    <SafeAreaView style={[styles.screen, { backgroundColor: palette.background }]} edges={['top']}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Pressable style={styles.headerButton} onPress={handleGoBack}>
-          <Ionicons name="chevron-back" size={24} color={palette.text} />
-        </Pressable>
-        
-        <View style={styles.headerCenter}>
-          <Text style={styles.headerTitle}>
-            {isOwner ? (isEditing ? 'Modifica Profilo' : 'Il Tuo Profilo') : 'Profilo'}
-          </Text>
-          {isOwner && !isEditing && (
-            <Text style={styles.headerSubtitle}>Tocca l'icona della matita per modificare</Text>
-          )}
-        </View>
-
-        {isOwner ? (
-          <View style={styles.headerActions}>
-            {isEditing ? (
-              <Pressable style={[styles.headerButton, styles.cancelButton]} onPress={handleCancelEdit}>
-                <Ionicons name="close" size={22} color="#ff3b30" />
-              </Pressable>
-            ) : (
-              <Pressable style={[styles.headerButton, styles.editButton]} onPress={() => setIsEditing(true)}>
-                <Ionicons name="create-outline" size={22} color={palette.tint} />
-              </Pressable>
-            )}
-          </View>
-        ) : (
-          <View style={styles.headerButton} />
-        )}
-      </View>
+    <SafeAreaView
+      style={[styles.screen, { backgroundColor: palette.background }]}
+      edges={['top', 'left', 'right']}
+    >
 
       <ScrollView 
         showsVerticalScrollIndicator={false} 
-        contentContainerStyle={styles.content}
+        contentContainerStyle={[
+          styles.content,
+          showMessageButton && styles.contentWithStickyCta,
+        ]}
       >
-        {/* Hero Section */}
-        <View style={styles.heroContainer}>
-          <Pressable
-            style={styles.heroPressable}
-            onPress={() => handleOpenPhoto(primaryPhotoUri, primaryMeta)}
-          >
-            <Image
-              source={{ uri: primaryPhotoUri }}
-              style={styles.heroImage}
-              contentFit="cover"
-              transition={200}
-              cachePolicy="memory-disk"
-              blurRadius={isPrimaryPending || isPrimaryHidden ? 20 : 0}
-            />
-            <View style={styles.heroOverlay} />
-            {isPrimaryPending || isPrimaryHidden ? (
-              <View style={styles.photoWarningOverlay}>
-                <View style={styles.photoWarningBadge}>
+          {/* Hero Section */}
+          <View style={styles.heroContainer}>
+            <Pressable
+              style={styles.heroPressable}
+              onPress={() => handleOpenPhoto(primaryPhotoUri)}
+              disabled={!hasGalleryPhotos}
+            >
+              {hasGalleryPhotos ? (
+                <Image
+                  source={{ uri: primaryPhotoUri }}
+                  style={styles.heroImage}
+                  contentFit="cover"
+                  transition={200}
+                  cachePolicy="memory-disk"
+                />
+              ) : (
+                <View style={[styles.heroPlaceholder, { backgroundColor: palette.card }]}>
+                  <Ionicons name="image-outline" size={42} color={palette.muted} />
+                  <Text style={[styles.heroPlaceholderText, { color: palette.muted }]}>
+                    Nessuna foto
+                  </Text>
+                </View>
+              )}
+              {hasGalleryPhotos ? <View style={styles.heroOverlay} /> : null}
+            </Pressable>
+            <View style={[styles.heroTopActions, { top: 8 }]} pointerEvents="box-none">
+              <Pressable style={styles.heroTopButton} onPress={handleGoBack}>
+                <Ionicons name="chevron-back" size={22} color="#fff" />
+              </Pressable>
+              {isOwner ? (
+                <Pressable
+                  style={[
+                    styles.heroTopButton,
+                    isEditing ? styles.heroCancelButton : styles.heroEditButton,
+                  ]}
+                  onPress={isEditing ? handleCancelEdit : () => setIsEditing(true)}
+                >
                   <Ionicons
-                    name={isPrimaryPending ? 'time-outline' : 'warning-outline'}
+                    name={isEditing ? 'close' : 'create-outline'}
                     size={20}
                     color="#fff"
                   />
-                </View>
-                <Text style={styles.photoWarningText}>
-                  {isPrimaryPending ? 'Contenuto in verifica' : 'Foto segnalata'}
+                </Pressable>
+              ) : (
+                <View />
+              )}
+            </View>
+            <View style={styles.heroContent}>
+              <View style={styles.heroTextContainer}>
+                <Text style={[styles.heroName, { color: hasGalleryPhotos ? '#fff' : palette.text }]}>
+                  {name || profile.name}, {age || profile.age}
                 </Text>
-              </View>
-            ) : null}
-          </Pressable>
-          <View style={styles.heroContent}>
-            <View style={styles.heroTextContainer}>
-              <Text style={styles.heroName}>
-                {name || profile.name}, {age || profile.age}
-              </Text>
-              <View style={styles.heroMetaRow}>
-                <View style={styles.metaItem}>
-                  <Ionicons name="location" size={14} color="#fff" />
-                  <Text style={styles.heroMeta}>{city || profile.city}</Text>
-                </View>
-                {jobTitle && (
-                  <View style={styles.metaItem}>
-                    <Ionicons name="briefcase" size={14} color="#fff" />
-                    <Text style={styles.heroMeta}>{jobTitle}</Text>
+                {showHeroMeta && (
+                  <View style={styles.heroMetaRow}>
+                    {hasCity && (
+                      <View style={styles.metaItem}>
+                        <Ionicons
+                          name="location"
+                          size={14}
+                          color={hasGalleryPhotos ? '#fff' : palette.muted}
+                        />
+                        <Text
+                          style={[
+                            styles.heroMeta,
+                            { color: hasGalleryPhotos ? 'rgba(255,255,255,0.9)' : palette.muted },
+                          ]}
+                        >
+                          {displayCity}
+                        </Text>
+                      </View>
+                    )}
+                    {hasJobTitle && (
+                      <View style={styles.metaItem}>
+                        <Ionicons
+                          name="briefcase"
+                          size={14}
+                          color={hasGalleryPhotos ? '#fff' : palette.muted}
+                        />
+                        <Text
+                          style={[
+                            styles.heroMeta,
+                            { color: hasGalleryPhotos ? 'rgba(255,255,255,0.9)' : palette.muted },
+                          ]}
+                        >
+                          {displayJobTitle}
+                        </Text>
+                      </View>
+                    )}
                   </View>
                 )}
               </View>
             </View>
-            
-          </View>
         </View>
 
         {/* Edit Mode Banner */}
@@ -636,38 +729,18 @@ export default function ProfileDetailScreen() {
               contentContainerStyle={styles.photosStrip}
             >
               {galleryPhotos.map((uri, index) => {
-                const meta = galleryMeta[index];
-                const isPending = meta?.moderationStatus === 'pending';
-                const isFlagged =
-                  meta?.moderationStatus === 'flagged' && meta?.contentWarning === 'nudity';
-                const isHidden = isFlagged && !revealedPhotos[uri];
                 return (
                   <Pressable
                     key={uri}
                     style={styles.photoContainer}
-                    onPress={() => handleOpenPhoto(uri, meta)}
+                    onPress={() => handleOpenPhoto(uri)}
                   >
                     <Image
                       source={{ uri: uri || primaryPhotoUri }}
                       style={styles.photo}
                       contentFit="cover"
                       cachePolicy="memory-disk"
-                      blurRadius={isPending || isHidden ? 20 : 0}
                     />
-                    {isPending || isHidden ? (
-                      <View style={styles.photoWarningOverlay}>
-                        <View style={styles.photoWarningBadge}>
-                          <Ionicons
-                            name={isPending ? 'time-outline' : 'warning-outline'}
-                            size={18}
-                            color="#fff"
-                          />
-                        </View>
-                        <Text style={styles.photoWarningText}>
-                          {isPending ? 'Contenuto in verifica' : 'Foto segnalata'}
-                        </Text>
-                      </View>
-                    ) : null}
                     {isOwner && isEditing && (
                       <>
                         <Pressable
@@ -718,24 +791,27 @@ export default function ProfileDetailScreen() {
         </View>
 
         {/* Preferenze */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Preferenze</Text>
+        {showPreferencesSection && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Preferenze</Text>
 
-          <View style={styles.infoCard}>
-            <View style={styles.infoRow}>
-              <View style={styles.infoLabelContainer}>
-                <Ionicons name="flash" size={18} color={palette.muted} />
-                <Text style={styles.infoLabel}>Ruolo</Text>
-              </View>
-              {isOwner && isEditing ? (
-                <View style={styles.chipsRow}>
+            <View style={styles.infoCard}>
+            {isOwner && isEditing ? (
+              <View style={styles.infoStack}>
+                <View style={[styles.infoLabelContainer, styles.infoLabelContainerStack]}>
+                  <Ionicons name="flash" size={18} color={palette.muted} />
+                  <Text style={styles.infoLabel}>Ruolo</Text>
+                </View>
+                <View style={[styles.chipsRow, styles.chipsWrap]}>
                   {roleOptions.map((opt) => {
                     const selected = role === opt;
+                    const iconName = roleIconMap[opt];
                     return (
                       <Pressable
                         key={opt}
                         style={[
                           styles.chip,
+                          styles.chipRow,
                           {
                             borderColor: selected ? palette.tint : palette.border,
                             backgroundColor: selected ? `${palette.tint}20` : palette.card,
@@ -743,6 +819,13 @@ export default function ProfileDetailScreen() {
                         ]}
                         onPress={() => setRole(opt)}
                       >
+                        {iconName ? (
+                          <Ionicons
+                            name={iconName}
+                            size={14}
+                            color={selected ? palette.tint : palette.text}
+                          />
+                        ) : null}
                         <Text
                           style={[
                             styles.chipText,
@@ -755,20 +838,31 @@ export default function ProfileDetailScreen() {
                     );
                   })}
                 </View>
-              ) : (
-                <Text style={[styles.infoValue, { color: palette.text }]}>
-                  {role || profile.role || 'Non specificato'}
-                </Text>
-              )}
-            </View>
-
-            <View style={styles.infoRow}>
-              <View style={styles.infoLabelContainer}>
-                <Ionicons name="heart" size={18} color={palette.muted} />
-                <Text style={styles.infoLabel}>Intento</Text>
               </View>
-              {isOwner && isEditing ? (
-                <View style={styles.chipsRow}>
+            ) : hasRole ? (
+              <View style={styles.infoRow}>
+                <View style={styles.infoLabelContainer}>
+                  <Ionicons name="flash" size={18} color={palette.muted} />
+                  <Text style={styles.infoLabel}>Ruolo</Text>
+                </View>
+                <View style={styles.infoValueRow}>
+                  {hasRoleIcon ? (
+                    <Ionicons name={roleIconName} size={16} color={palette.text} />
+                  ) : null}
+                  <Text style={[styles.infoValue, styles.infoValueText, { color: palette.text }]}>
+                    {displayRole}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+
+            {isOwner && isEditing ? (
+              <View style={styles.infoStack}>
+                <View style={[styles.infoLabelContainer, styles.infoLabelContainerStack]}>
+                  <Ionicons name="heart" size={18} color={palette.muted} />
+                  <Text style={styles.infoLabel}>Intento</Text>
+                </View>
+                <View style={[styles.chipsRow, styles.chipsWrap]}>
                   {intentOptions.map((opt) => {
                     const selected = intent === opt;
                     return (
@@ -795,20 +889,26 @@ export default function ProfileDetailScreen() {
                     );
                   })}
                 </View>
-              ) : (
-                <Text style={[styles.infoValue, { color: palette.text }]}>
-                  {intent || profile.intent || 'Non specificato'}
-                </Text>
-              )}
-            </View>
-
-            <View style={[styles.infoRow, { alignItems: 'flex-start' }]}>
-              <View style={styles.infoLabelContainer}>
-                <Ionicons name="sparkles" size={18} color={palette.muted} />
-                <Text style={styles.infoLabel}>Interessi</Text>
               </View>
-              {isOwner && isEditing ? (
-                <View style={[styles.chipsRow, { flexWrap: 'wrap', justifyContent: 'flex-end' }]}>
+            ) : hasIntent ? (
+              <View style={styles.infoRow}>
+                <View style={styles.infoLabelContainer}>
+                  <Ionicons name="heart" size={18} color={palette.muted} />
+                  <Text style={styles.infoLabel}>Intento</Text>
+                </View>
+                <Text style={[styles.infoValue, { color: palette.text }]}>
+                  {displayIntent}
+                </Text>
+              </View>
+            ) : null}
+
+            {isOwner && isEditing ? (
+              <View style={styles.infoStack}>
+                <View style={[styles.infoLabelContainer, styles.infoLabelContainerStack]}>
+                  <Ionicons name="sparkles" size={18} color={palette.muted} />
+                  <Text style={styles.infoLabel}>Interessi</Text>
+                </View>
+                <View style={[styles.chipsRow, styles.chipsWrap]}>
                   {interestOptions.map((opt) => {
                     const selected = userInterests.includes(opt);
                     return (
@@ -836,34 +936,35 @@ export default function ProfileDetailScreen() {
                     );
                   })}
                 </View>
-              ) : (
-                <View style={[styles.chipsRow, { flexWrap: 'wrap', justifyContent: 'flex-end' }]}>
-                  {(userInterests.length ? userInterests : profile.interests || []).length ? (
-                    (userInterests.length ? userInterests : profile.interests || []).map((opt) => (
-                      <View
-                        key={opt}
-                        style={[
-                          styles.chip,
-                          {
-                            borderColor: palette.border,
-                            backgroundColor: palette.card,
-                            marginBottom: 8,
-                          },
-                        ]}
-                      >
-                        <Text style={[styles.chipText, { color: palette.text }]}>{opt}</Text>
-                      </View>
-                    ))
-                  ) : (
-                    <Text style={[styles.infoValue, { color: palette.muted }]}>
-                      Nessun interesse indicato
-                    </Text>
-                  )}
+              </View>
+            ) : hasInterests ? (
+              <View style={styles.infoStack}>
+                <View style={[styles.infoLabelContainer, styles.infoLabelContainerStack]}>
+                  <Ionicons name="sparkles" size={18} color={palette.muted} />
+                  <Text style={styles.infoLabel}>Interessi</Text>
                 </View>
-              )}
+                <View style={[styles.chipsRow, styles.chipsWrap, { width: '100%' }]}>
+                  {displayInterests.map((opt) => (
+                    <View
+                      key={opt}
+                      style={[
+                        styles.chip,
+                        {
+                          borderColor: palette.border,
+                          backgroundColor: palette.card,
+                          marginBottom: 8,
+                        },
+                      ]}
+                    >
+                      <Text style={[styles.chipText, { color: palette.text }]}>{opt}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            ) : null}
             </View>
           </View>
-        </View>
+        )}
 
         {/* Informazioni Section */}
         <View style={styles.section}>
@@ -915,7 +1016,7 @@ export default function ProfileDetailScreen() {
             </View>
 
             {/* Città */}
-            <View style={styles.infoRow}>
+            <View style={[styles.infoRow, !isEditingView && !hasCity && styles.hidden]}>
               <View style={styles.infoLabelContainer}>
                 <Ionicons name="location" size={18} color={palette.muted} />
                 <Text style={styles.infoLabel}>Città</Text>
@@ -930,13 +1031,13 @@ export default function ProfileDetailScreen() {
                 />
               ) : (
                 <Text style={[styles.infoValue, { color: palette.text }]}>
-                  {city || profile.city}
+                  {displayCity}
                 </Text>
               )}
             </View>
 
             {/* Professione */}
-            <View style={styles.infoRow}>
+            <View style={[styles.infoRow, !isEditingView && !hasJobTitle && styles.hidden]}>
               <View style={styles.infoLabelContainer}>
                 <Ionicons name="briefcase" size={18} color={palette.muted} />
                 <Text style={styles.infoLabel}>Professione</Text>
@@ -951,7 +1052,7 @@ export default function ProfileDetailScreen() {
                 />
               ) : (
                 <Text style={[styles.infoValue, { color: palette.text }]}>
-                  {jobTitle || "Non specificato"}
+                  {displayJobTitle}
                 </Text>
               )}
             </View>
@@ -959,34 +1060,36 @@ export default function ProfileDetailScreen() {
         </View>
 
         {/* Bio Section */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Bio</Text>
-            {isOwner && isEditing && (
-              <Text style={[styles.charCount, { color: palette.muted }]}>
-                {bio.length}/500
-              </Text>
-            )}
+        {showBioSection && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Bio</Text>
+              {isOwner && isEditing && (
+                <Text style={[styles.charCount, { color: palette.muted }]}>
+                  {bio.length}/500
+                </Text>
+              )}
+            </View>
+            <View style={styles.bioCard}>
+              {isOwner && isEditing ? (
+                <TextInput
+                  value={bio}
+                  onChangeText={setBio}
+                  placeholder="Racconta qualcosa su di te... (max 500 caratteri)"
+                  multiline
+                  style={[styles.bioInput, { color: palette.text }]}
+                  placeholderTextColor={palette.muted}
+                  textAlignVertical="top"
+                  maxLength={500}
+                />
+              ) : (
+                <Text style={[styles.bioText, { color: palette.text }]}>
+                  {displayBio}
+                </Text>
+              )}
+            </View>
           </View>
-          <View style={styles.bioCard}>
-            {isOwner && isEditing ? (
-              <TextInput
-                value={bio}
-                onChangeText={setBio}
-                placeholder="Racconta qualcosa su di te... (max 500 caratteri)"
-                multiline
-                style={[styles.bioInput, { color: palette.text }]}
-                placeholderTextColor={palette.muted}
-                textAlignVertical="top"
-                maxLength={500}
-              />
-            ) : (
-              <Text style={[styles.bioText, { color: palette.text }]}>
-                {bio || "Nessuna bio disponibile"}
-              </Text>
-            )}
-          </View>
-        </View>
+        )}
 
         {/* Azioni finali */}
         {isOwner && isEditing && (
@@ -1016,9 +1119,77 @@ export default function ProfileDetailScreen() {
           </View>
         )}
 
-        {!isOwner && !isEditing && (
+      </ScrollView>
+
+      {showMessageButton && (
+        <View
+          style={[
+            styles.stickyCta,
+            {
+              backgroundColor: palette.background,
+              borderTopColor: palette.border,
+              paddingBottom: Math.max(insets.bottom, 8) + 8,
+            },
+          ]}
+        >
+          <View style={styles.ctaActionsRow}>
+            <Pressable
+              style={[
+                styles.ctaAction,
+                {
+                  borderColor: palette.border,
+                  backgroundColor: isInterested
+                    ? `${palette.tint}18`
+                    : isTapCooldownActive
+                    ? `${palette.border}66`
+                    : palette.card,
+                },
+              ]}
+              onPress={handleToggleInterest}
+              disabled={updatingInterest || isInterested || isTapCooldownActive}
+            >
+              <Ionicons
+                name={isInterested ? 'heart' : 'heart-outline'}
+                size={18}
+                color={isInterested ? palette.tint : isTapCooldownActive ? palette.muted : palette.text}
+              />
+              <Text
+                style={[
+                  styles.ctaActionText,
+                  { color: isInterested ? palette.tint : isTapCooldownActive ? palette.muted : palette.text },
+                ]}
+              >
+                {interestLabel}
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.ctaAction,
+                {
+                  borderColor: palette.border,
+                  backgroundColor: isFavorite ? `${palette.accent}18` : palette.card,
+                },
+              ]}
+              onPress={handleToggleFavorite}
+              disabled={updatingFavorite}
+            >
+              <Ionicons
+                name={isFavorite ? 'bookmark' : 'bookmark-outline'}
+                size={18}
+                color={isFavorite ? palette.accent : palette.text}
+              />
+              <Text
+                style={[
+                  styles.ctaActionText,
+                  { color: isFavorite ? palette.accent : palette.text },
+                ]}
+              >
+                Preferiti
+              </Text>
+            </Pressable>
+          </View>
           <Pressable
-            style={[styles.messageButton, { backgroundColor: palette.tint }]}
+            style={[styles.messageButton, styles.messageButtonSticky, { backgroundColor: palette.tint }]}
             onPress={() =>
               router.push({
                 pathname: `/messages/${profile.id}`,
@@ -1029,9 +1200,8 @@ export default function ProfileDetailScreen() {
             <Ionicons name="chatbubbles" size={18} color="#fff" />
             <Text style={styles.messageButtonText}>Messaggia</Text>
           </Pressable>
-        )}
-
-      </ScrollView>
+        </View>
+      )}
 
       <Modal
         visible={viewPhotoVisible}
@@ -1068,43 +1238,6 @@ const styles = StyleSheet.create({
   screen: {
     flex: 1,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: 'rgba(0,0,0,0.08)',
-    marginTop:30
-  },
-  headerButton: {
-    padding: 8,
-    borderRadius: 12,
-  },
-  editButton: {
-    backgroundColor: 'rgba(0,122,255,0.1)',
-  },
-  cancelButton: {
-    backgroundColor: 'rgba(255,59,48,0.1)',
-  },
-  headerCenter: {
-    alignItems: 'center',
-    flex: 1,
-    
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    marginBottom: 2,    
-  },
-  headerSubtitle: {
-    fontSize: 12,
-    opacity: 0.6,
-  },
-  headerActions: {
-    flexDirection: 'row',
-  },
   loading: {
     flex: 1,
     justifyContent: 'center',
@@ -1118,8 +1251,11 @@ const styles = StyleSheet.create({
   content: {
     paddingBottom: 30,
   },
+  contentWithStickyCta: {
+    paddingBottom: 170,
+  },
   heroContainer: {
-    height: 320,
+    height: 340,
     position: 'relative',
   },
   heroPressable: {
@@ -1129,9 +1265,43 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  heroPlaceholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  heroPlaceholderText: {
+    fontSize: 14,
+    fontWeight: '600',
+  },
   heroOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
+  },
+  heroTopActions: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    top: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  heroTopButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  heroEditButton: {
+    backgroundColor: 'rgba(0,0,0,0.45)',
+  },
+  heroCancelButton: {
+    backgroundColor: 'rgba(255,59,48,0.7)',
   },
   heroContent: {
     position: 'absolute',
@@ -1139,30 +1309,6 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     padding: 24,
-  },
-  photoWarningOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    paddingHorizontal: 16,
-  },
-  photoWarningBadge: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.3)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.12)',
-  },
-  photoWarningText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-    textAlign: 'center',
   },
   heroTextContainer: {
     gap: 8,
@@ -1313,22 +1459,45 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
   },
+  hidden: {
+    display: 'none',
+  },
   infoLabelContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
-    flex: 1,
+    flexGrow: 1,
+    flexShrink: 0,
+    flexBasis: 'auto',
+    minWidth: 96,
   },
   infoLabel: {
     fontSize: 16,
     fontWeight: '600',
     opacity: 0.8,
   },
+  infoValueRow: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 6,
+  },
   infoValue: {
     fontSize: 16,
     fontWeight: '500',
     flex: 1,
     textAlign: 'right',
+  },
+  infoValueText: {
+    flex: 0,
+  },
+  infoStack: {
+    gap: 10,
+  },
+  infoLabelContainerStack: {
+    flex: 0,
+    width: '100%',
   },
   textInput: {
     fontSize: 16,
@@ -1400,9 +1569,42 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
     elevation: 3,
   },
+  messageButtonSticky: {
+    marginHorizontal: 0,
+    marginTop: 0,
+  },
   messageButtonText: {
     color: '#fff',
     fontSize: 16,
+    fontWeight: '700',
+  },
+  stickyCta: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    bottom: 0,
+    paddingHorizontal: 20,
+    paddingTop: 12,
+    borderTopWidth: 1,
+  },
+  ctaActionsRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 12,
+  },
+  ctaAction: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  ctaActionText: {
+    fontSize: 14,
     fontWeight: '700',
   },
   cancelBtn: {
@@ -1421,11 +1623,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: 8,
   },
+  chipsWrap: {
+    flexWrap: 'wrap',
+  },
   chip: {
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 14,
     borderWidth: 1,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
   },
   chipText: {
     fontSize: 14,

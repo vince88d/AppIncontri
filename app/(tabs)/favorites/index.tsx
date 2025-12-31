@@ -1,11 +1,10 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Image } from 'expo-image';
 import { router } from 'expo-router';
-import { arrayRemove, deleteField, doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   FlatList,
   Pressable,
   StyleSheet,
@@ -24,24 +23,22 @@ type ProfilePreview = {
   name: string;
   photo?: string;
   age?: number;
+  city?: string;
 };
 
 const FALLBACK_PHOTO =
   'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=900&q=80';
 
-export default function BlockedUsersScreen() {
+export default function FavoritesScreen() {
   const colorScheme = useColorScheme();
   const palette = Colors[colorScheme ?? 'light'];
   const { user } = useAuth();
-  const [blockedIds, setBlockedIds] = useState<string[]>([]);
   const [items, setItems] = useState<ProfilePreview[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
-  const [unblockingId, setUnblockingId] = useState<string | null>(null);
 
-  const loadBlocked = async (isRefresh = false) => {
+  const loadFavorites = async (isRefresh = false) => {
     if (!user?.uid) {
-      setBlockedIds([]);
       setItems([]);
       setLoading(false);
       return;
@@ -50,20 +47,28 @@ export default function BlockedUsersScreen() {
     else setLoading(true);
     try {
       const snap = await getDoc(doc(db, 'profiles', user.uid));
-      const ids = snap.exists() && Array.isArray((snap.data() as any).blocked)
-        ? ((snap.data() as any).blocked as string[])
-        : [];
-      setBlockedIds(ids);
+      const data = snap.exists() ? (snap.data() as any) : {};
+      const favorites = Array.isArray(data.favorites) ? data.favorites : [];
+      const myBlocked = Array.isArray(data.blocked) ? data.blocked : [];
+      const myBlockedBy = Array.isArray(data.blockedBy) ? data.blockedBy : [];
+
       const profiles = await Promise.all(
-        ids.map(async (id) => {
+        favorites.map(async (id: string) => {
           const pSnap = await getDoc(doc(db, 'profiles', id));
           if (!pSnap.exists()) return null;
-          const data = pSnap.data() as any;
+          const pData = pSnap.data() as any;
+          const blockedByTarget = Array.isArray(pData.blocked) && pData.blocked.includes(user.uid);
+          const targetSaysNo =
+            Array.isArray(pData.blockedBy) && pData.blockedBy.includes(user.uid);
+          const iBlocked = myBlocked.includes(pSnap.id);
+          const iAmBlockedBy = myBlockedBy.includes(pSnap.id);
+          if (blockedByTarget || targetSaysNo || iBlocked || iAmBlockedBy) return null;
           return {
             id: pSnap.id,
-            name: data.name ?? 'Utente',
-            photo: data.photo ?? data.photos?.[0] ?? FALLBACK_PHOTO,
-            age: data.age,
+            name: pData.name ?? 'Utente',
+            photo: pData.photo ?? pData.photos?.[0] ?? FALLBACK_PHOTO,
+            age: pData.age,
+            city: pData.city,
           } as ProfilePreview;
         })
       );
@@ -77,49 +82,8 @@ export default function BlockedUsersScreen() {
   };
 
   useEffect(() => {
-    loadBlocked();
+    loadFavorites();
   }, [user?.uid]);
-
-  const handleUnblock = (targetId: string) => {
-    if (!user?.uid) return;
-    Alert.alert(
-      'Sblocca utente',
-      'Sbloccando tornerete a vedervi e potrete chattare di nuovo. Procedere?',
-      [
-      { text: 'Annulla', style: 'cancel' },
-      {
-        text: 'Sblocca',
-        onPress: async () => {
-          setUnblockingId(targetId);
-          const chatId = [user.uid, targetId].sort().join('_');
-          try {
-            await Promise.all([
-              setDoc(
-                doc(db, 'profiles', user.uid),
-                { blocked: arrayRemove(targetId) },
-                { merge: true }
-              ),
-              setDoc(
-                doc(db, 'profiles', targetId),
-                { blockedBy: arrayRemove(user.uid) },
-                { merge: true }
-              ),
-              setDoc(
-                doc(db, 'chats', chatId),
-                { blockedBy: { [user.uid]: deleteField() } },
-                { merge: true }
-              ),
-            ]);
-            await loadBlocked(true);
-          } catch (e) {
-            Alert.alert('Errore', 'Non sono riuscito a sbloccare, riprova.');
-          } finally {
-            setUnblockingId(null);
-          }
-        },
-      },
-    ]);
-  };
 
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: palette.background }]}>
@@ -127,7 +91,7 @@ export default function BlockedUsersScreen() {
         <Pressable onPress={() => router.back()} style={styles.headerBtn}>
           <Ionicons name="arrow-back" size={22} color={palette.text} />
         </Pressable>
-        <Text style={[styles.title, { color: palette.text }]}>Utenti bloccati</Text>
+        <Text style={[styles.title, { color: palette.text }]}>Preferiti</Text>
         <View style={styles.headerPlaceholder} />
       </View>
 
@@ -138,8 +102,8 @@ export default function BlockedUsersScreen() {
         </View>
       ) : items.length === 0 ? (
         <View style={styles.center}>
-          <Ionicons name="happy-outline" size={32} color={palette.muted} />
-          <Text style={[styles.muted, { color: palette.muted }]}>Nessun utente bloccato</Text>
+          <Ionicons name="bookmark-outline" size={32} color={palette.muted} />
+          <Text style={[styles.muted, { color: palette.muted }]}>Nessun preferito</Text>
         </View>
       ) : (
         <FlatList
@@ -147,15 +111,16 @@ export default function BlockedUsersScreen() {
           keyExtractor={(item) => item.id}
           contentContainerStyle={styles.list}
           refreshing={refreshing}
-          onRefresh={() => loadBlocked(true)}
+          onRefresh={() => loadFavorites(true)}
           renderItem={({ item }) => {
             const hasPhoto = !!item.photo && item.photo !== FALLBACK_PHOTO;
             return (
-              <View
+              <Pressable
                 style={[
                   styles.card,
                   { borderColor: palette.border, backgroundColor: palette.card },
                 ]}
+                onPress={() => router.push(`/profile/${item.id}`)}
               >
                 <View style={styles.cardLeft}>
                   {hasPhoto ? (
@@ -174,27 +139,15 @@ export default function BlockedUsersScreen() {
                       {item.name}
                       {item.age ? `, ${item.age}` : ''}
                     </Text>
+                    {item.city ? (
+                      <Text style={[styles.city, { color: palette.muted }]} numberOfLines={1}>
+                        {item.city}
+                      </Text>
+                    ) : null}
                   </View>
                 </View>
-                <Pressable
-                  style={[
-                    styles.unblockBtn,
-                    { backgroundColor: palette.tint },
-                    unblockingId === item.id && { opacity: 0.7 },
-                  ]}
-                  disabled={unblockingId === item.id}
-                  onPress={() => handleUnblock(item.id)}
-                >
-                  {unblockingId === item.id ? (
-                    <ActivityIndicator size="small" color="#fff" />
-                  ) : (
-                    <>
-                      <Ionicons name="lock-open-outline" size={16} color="#fff" />
-                      <Text style={styles.unblockText}>Sblocca</Text>
-                    </>
-                  )}
-                </Pressable>
-              </View>
+                <Ionicons name="chevron-forward" size={18} color={palette.muted} />
+              </Pressable>
             );
           }}
         />
@@ -271,16 +224,9 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
   },
-  unblockBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
-  },
-  unblockText: {
-    color: '#fff',
-    fontWeight: '700',
+  city: {
+    marginTop: 2,
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

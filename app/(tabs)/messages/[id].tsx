@@ -2,6 +2,7 @@ import Ionicons from '@expo/vector-icons/Ionicons';
 import { useFocusEffect } from '@react-navigation/native';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
 import { router, useLocalSearchParams } from 'expo-router';
 import {
@@ -48,6 +49,7 @@ import { useAudioRecorder } from '@/hooks/useAudioRecorder';
 import { useAuth } from '@/hooks/use-auth';
 import { useChatMessages } from '@/hooks/useChatMessages';
 import { db } from '@/lib/firebase';
+import { analyzeImageSensitivity } from '@/lib/sensitivity';
 
 import { ChatMessageItem } from '@/components/messages/ChatMessageItem';
 import { ParticleEffect } from '@/components/messages/ParticleEffect';
@@ -59,8 +61,7 @@ type ChatMessage = {
   createdAt?: Timestamp | Date;
   image?: string;
   imagePath?: string;
-  moderationStatus?: 'pending' | 'ok' | 'flagged';
-  contentWarning?: 'nudity' | null;
+  sensitive?: boolean;
   audio?: string;
   audioDuration?: number;
   expiresAfterView?: boolean;
@@ -81,6 +82,56 @@ const SECRET_EXPIRY_MS = 10_000;
 const INITIAL_MESSAGES_LIMIT = 30;
 const TRANSLATION_LANG_OPTIONS = ['en', 'es', 'fr', 'de', 'it'];
 const DEFAULT_INCOMING_TRANSLATION_LANG = 'it';
+const MAX_DATA_URL_LENGTH = 900_000;
+const RESIZE_STEPS = [1280, 1024, 800, 640, 512];
+const QUALITY_STEPS = [0.8, 0.7, 0.6, 0.5];
+
+const buildDataUrl = (base64: string, mime: string) => `data:${mime};base64,${base64}`;
+
+const isDataUrlWithinLimit = (dataUrl: string) => dataUrl.length <= MAX_DATA_URL_LENGTH;
+
+const getAssetMime = (asset: ImagePicker.ImagePickerAsset) => {
+  const mime =
+    (asset as any).mimeType ||
+    (asset.type && asset.type.includes('/') ? asset.type : null) ||
+    'image/jpeg';
+  return mime;
+};
+
+const getResizeActions = (asset: ImagePicker.ImagePickerAsset, maxSize: number) => {
+  const width = asset.width ?? 0;
+  const height = asset.height ?? 0;
+  if (!width || !height) return [];
+  if (Math.max(width, height) <= maxSize) return [];
+  if (width >= height) {
+    return [{ resize: { width: maxSize } }];
+  }
+  return [{ resize: { height: maxSize } }];
+};
+
+const buildCompressedDataUrl = async (asset: ImagePicker.ImagePickerAsset) => {
+  const mime = getAssetMime(asset);
+  if (asset.base64) {
+    const dataUrl = buildDataUrl(asset.base64, mime);
+    if (isDataUrlWithinLimit(dataUrl)) return dataUrl;
+  }
+
+  for (const size of RESIZE_STEPS) {
+    const actions = getResizeActions(asset, size);
+    for (const quality of QUALITY_STEPS) {
+      const result = await ImageManipulator.manipulateAsync(
+        asset.uri,
+        actions,
+        { compress: quality, format: ImageManipulator.SaveFormat.JPEG, base64: true }
+      );
+      if (!result.base64) continue;
+      const dataUrl = buildDataUrl(result.base64, 'image/jpeg');
+      if (isDataUrlWithinLimit(dataUrl)) return dataUrl;
+    }
+  }
+
+  return null;
+};
 
 export default function ChatScreen() {
   const { id: otherId, name: initialName, photo: initialPhoto, chatId: chatIdParam } =
@@ -131,12 +182,13 @@ export default function ChatScreen() {
   const [previewImage, setPreviewImage] = useState<string | null>(null);
   const [previewVisible, setPreviewVisible] = useState(false);
   const [imageTimed, setImageTimed] = useState(false);
+  const [previewSensitive, setPreviewSensitive] = useState(false);
+  const [imageSourceSheetVisible, setImageSourceSheetVisible] = useState(false);
   const [viewImage, setViewImage] = useState<string | null>(null);
   const [viewImageVisible, setViewImageVisible] = useState(false);
   const [viewImageTimed, setViewImageTimed] = useState(false);
   const [viewImageCountdown, setViewImageCountdown] = useState<number | null>(null);
   const [viewImageExpiry, setViewImageExpiry] = useState<number | null>(null);
-  const [revealedWarnings, setRevealedWarnings] = useState<Record<string, boolean>>({});
 
   const {
     isRecording,
@@ -161,6 +213,7 @@ export default function ChatScreen() {
   const fadeTimeoutsRef = useRef<Record<string, NodeJS.Timeout>>({});
   const fadeValuesRef = useRef<Record<string, Animated.Value>>({});
   const scaleValuesRef = useRef<Record<string, Animated.Value>>({});
+  const imageSourceAnim = useRef(new Animated.Value(0)).current;
 
   const formatTime = useCallback((timestamp: any) => {
     if (!timestamp) return '';
@@ -484,17 +537,57 @@ export default function ChatScreen() {
     handleSendMessage({ text: textToSend }, secretMode);
   };
 
-  const handleSendImage = async () => {
-    if (chatBlocked) {
-      Alert.alert('Chat bloccata', 'Sblocca per inviare nuove foto.');
+  const openImageSourceSheet = useCallback(() => {
+    imageSourceAnim.setValue(0);
+    setImageSourceSheetVisible(true);
+    Animated.timing(imageSourceAnim, {
+      toValue: 1,
+      duration: 220,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [imageSourceAnim]);
+
+  const closeImageSourceSheet = useCallback(
+    (onClosed?: () => void) => {
+      Animated.timing(imageSourceAnim, {
+        toValue: 0,
+        duration: 180,
+        easing: Easing.in(Easing.cubic),
+        useNativeDriver: true,
+      }).start(({ finished }) => {
+        if (!finished) return;
+        setImageSourceSheetVisible(false);
+        if (onClosed) onClosed();
+      });
+    },
+    [imageSourceAnim]
+  );
+
+  const processImageAsset = useCallback(async (asset: ImagePicker.ImagePickerAsset) => {
+    const dataUrl = await buildCompressedDataUrl(asset);
+    if (!dataUrl) {
+      Alert.alert('Foto troppo grande', 'Riduci la dimensione o scatta una foto meno pesante.');
       return;
     }
-    if (isBlocked) {
-      Alert.alert('Utente bloccato', 'Sblocca per inviare nuove foto.');
-      return;
+    let sensitive = false;
+    try {
+      const analysis = await analyzeImageSensitivity({
+        uri: asset.uri,
+        base64: asset.base64,
+        mime: getAssetMime(asset),
+      });
+      sensitive = analysis.sensitive;
+    } catch (e) {
+      sensitive = false;
     }
-    if (!chatId || !user?.uid || !otherId) return;
-    setActionsOpen(false);
+    setImageTimed(false);
+    setPreviewImage(dataUrl);
+    setPreviewSensitive(sensitive);
+    setPreviewVisible(true);
+  }, []);
+
+  const pickFromLibrary = useCallback(async () => {
     const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (perm.status !== 'granted') {
       Alert.alert('Permesso negato', 'Concedi accesso alle foto per inviare un\'immagine.');
@@ -507,34 +600,61 @@ export default function ChatScreen() {
       selectionLimit: 1,
     });
     if (result.canceled || !result.assets.length) return;
-    const asset = result.assets[0];
-    const mime =
-      (asset as any).mimeType ||
-      (asset.type && asset.type.includes('/') ? asset.type : null) ||
-      null;
-    const dataUrl = asset.base64
-      ? `data:${mime ?? 'image/jpeg'};base64,${asset.base64}`
-      : asset.uri;
-    setImageTimed(false);
-    setPreviewImage(dataUrl);
-    setPreviewVisible(true);
+    await processImageAsset(result.assets[0]);
+  }, [processImageAsset]);
+
+  const pickFromCamera = useCallback(async () => {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (perm.status !== 'granted') {
+      Alert.alert('Permesso negato', 'Concedi accesso alla fotocamera per scattare una foto.');
+      return;
+    }
+    const result = await ImagePicker.launchCameraAsync({
+      allowsEditing: false,
+      base64: true,
+      quality: 0.8,
+    });
+    if (result.canceled || !result.assets.length) return;
+    await processImageAsset(result.assets[0]);
+  }, [processImageAsset]);
+
+  const handleSendImage = async () => {
+    if (chatBlocked) {
+      Alert.alert('Chat bloccata', 'Sblocca per inviare nuove foto.');
+      return;
+    }
+    if (isBlocked) {
+      Alert.alert('Utente bloccato', 'Sblocca per inviare nuove foto.');
+      return;
+    }
+    if (!chatId || !user?.uid || !otherId) return;
+    setActionsOpen(false);
+    if (Platform.OS === 'web') {
+      await pickFromLibrary();
+      return;
+    }
+    openImageSourceSheet();
   };
 
-  const sendImageMessage = async (imageUri: string, timed: boolean) => {
+  const sendImageMessage = async (imageUri: string, timed: boolean, sensitive: boolean) => {
     if (!chatId || !user?.uid || !otherId) return;
 
     setSendingImage(true);
 
     try {
-      await handleSendMessage({ image: imageUri }, timed || secretMode);
+      await handleSendMessage(
+        { image: imageUri, sensitive },
+        timed || secretMode
+      );
     } catch (e: any) {
       console.error('sendImageMessage error:', e);
-      Alert.alert('Errore Upload', e.message || 'Errore sconosciuto durante il caricamento.');
+      Alert.alert('Errore', e.message || 'Impossibile inviare la foto. Riprova.');
     } finally {
       setSendingImage(false);
       setPreviewImage(null);
       setPreviewVisible(false);
       setImageTimed(false);
+      setPreviewSensitive(false);
     }
   };
 
@@ -806,32 +926,6 @@ export default function ChatScreen() {
 
   const handleOpenImageMessage = (message: ChatMessage) => {
     if (!message.image) return;
-    const isMine = message.senderId === user?.uid;
-    const missingModeration = !message.moderationStatus && !!message.imagePath;
-    if (!isMine && (message.moderationStatus === 'pending' || missingModeration)) {
-      Alert.alert('Contenuto in verifica', 'L\'immagine e in analisi. Riprova tra poco.');
-      return;
-    }
-    const isFlagged =
-      message.moderationStatus === 'flagged' && message.contentWarning === 'nudity';
-    if (isFlagged && !revealedWarnings[message.id]) {
-      Alert.alert(
-        'Contenuto sensibile',
-        'Questa immagine potrebbe contenere nudità. Vuoi vederla?',
-        [
-          { text: 'Annulla', style: 'cancel' },
-          { text: 'Elimina', style: 'destructive', onPress: () => handleDeleteMessage(message) },
-          {
-            text: 'OK',
-            onPress: () => {
-              setRevealedWarnings((prev) => ({ ...prev, [message.id]: true }));
-              openImageWithExpiry(message);
-            },
-          },
-        ]
-      );
-      return;
-    }
     openImageWithExpiry(message);
   };
 
@@ -858,7 +952,6 @@ export default function ChatScreen() {
         handlePlayAudio={handlePlayAudio}
         handleOpenImageMessage={handleOpenImageMessage}
         translateAllEnabled={translateAllEnabled}
-        revealedWarnings={revealedWarnings}
         ParticleEffect={ParticleEffect}
       />
     );
@@ -1321,6 +1414,75 @@ export default function ChatScreen() {
       </Modal>
 
       <Modal
+        visible={imageSourceSheetVisible}
+        transparent
+        animationType="none"
+        onRequestClose={() => closeImageSourceSheet()}
+      >
+        <View style={styles.sheetOverlay}>
+          <Animated.View
+            style={[
+              styles.sheetBackdrop,
+              {
+                opacity: imageSourceAnim.interpolate({
+                  inputRange: [0, 1],
+                  outputRange: [0, 0.45],
+                }),
+              },
+            ]}
+          />
+          <Pressable style={styles.sheetBackdropPress} onPress={() => closeImageSourceSheet()} />
+          <Animated.View
+            style={[
+              styles.sheetContainer,
+              {
+                backgroundColor: palette.card,
+                borderColor: palette.border,
+                transform: [
+                  {
+                    translateY: imageSourceAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [260, 0],
+                    }),
+                  },
+                ],
+              },
+            ]}
+          >
+            <View style={[styles.sheetHandle, { backgroundColor: palette.border }]} />
+            <Text style={[styles.sheetTitle, { color: palette.text }]}>Invia foto</Text>
+            <Pressable
+              style={[styles.sheetAction, { borderColor: palette.border }]}
+              onPress={() => closeImageSourceSheet(() => pickFromCamera())}
+            >
+              <View style={[styles.sheetIcon, { backgroundColor: `${palette.tint}18` }]}>
+                <Ionicons name="camera" size={18} color={palette.tint} />
+              </View>
+              <Text style={[styles.sheetActionText, { color: palette.text }]}>Fotocamera</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.sheetAction, { borderColor: palette.border }]}
+              onPress={() => closeImageSourceSheet(() => pickFromLibrary())}
+            >
+              <View style={[styles.sheetIcon, { backgroundColor: `${palette.tint}18` }]}>
+                <Ionicons name="images" size={18} color={palette.tint} />
+              </View>
+              <Text style={[styles.sheetActionText, { color: palette.text }]}>Galleria</Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.sheetCancel,
+                { backgroundColor: palette.background, borderColor: palette.border },
+              ]}
+              onPress={() => closeImageSourceSheet()}
+            >
+              <Text style={[styles.sheetCancelText, { color: palette.text }]}>Annulla</Text>
+            </Pressable>
+          </Animated.View>
+        </View>
+      </Modal>
+
+      <Modal
         visible={previewVisible}
         transparent
         animationType="fade"
@@ -1343,6 +1505,7 @@ export default function ChatScreen() {
                 setPreviewImage(null);
                 setPreviewVisible(false);
                 setImageTimed(false);
+                setPreviewSensitive(false);
               }}
               disabled={sendingImage}
             >
@@ -1390,6 +1553,7 @@ export default function ChatScreen() {
                 setPreviewImage(null);
                 setPreviewVisible(false);
                 setImageTimed(false);
+                setPreviewSensitive(false);
               }}
               disabled={sendingImage}
             >
@@ -1398,7 +1562,9 @@ export default function ChatScreen() {
             
             <Pressable
               style={[styles.modalActionButton, styles.confirmActionButton]}
-              onPress={() => previewImage && sendImageMessage(previewImage, imageTimed || secretMode)}
+              onPress={() =>
+                previewImage && sendImageMessage(previewImage, imageTimed || secretMode, previewSensitive)
+              }
               disabled={sendingImage || !previewImage}
             >
               {sendingImage ? (
@@ -1755,6 +1921,70 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  sheetOverlay: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  sheetBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#000',
+  },
+  sheetBackdropPress: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  sheetContainer: {
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    borderWidth: 1,
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 16,
+  },
+  sheetHandle: {
+    width: 46,
+    height: 5,
+    borderRadius: 999,
+    alignSelf: 'center',
+    marginBottom: 12,
+  },
+  sheetTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  sheetAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    borderWidth: 1,
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    marginBottom: 10,
+  },
+  sheetIcon: {
+    width: 34,
+    height: 34,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetActionText: {
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  sheetCancel: {
+    borderRadius: 14,
+    borderWidth: 1,
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sheetCancelText: {
+    fontSize: 15,
+    fontWeight: '700',
   },
   modalBackdrop: {
     flex: 1,

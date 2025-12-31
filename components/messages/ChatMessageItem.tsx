@@ -4,6 +4,7 @@ import { Image } from 'expo-image';
 import React from 'react';
 import {
   ActivityIndicator,
+  Alert,
   Animated,
   Linking,
   Platform,
@@ -22,8 +23,7 @@ type ChatMessage = {
   createdAt?: Timestamp | Date;
   image?: string;
   imagePath?: string;
-  moderationStatus?: 'pending' | 'ok' | 'flagged';
-  contentWarning?: 'nudity' | null;
+  sensitive?: boolean;
   audio?: string;
   audioDuration?: number;
   expiresAfterView?: boolean;
@@ -59,7 +59,6 @@ type ChatMessageItemProps = {
   handlePlayAudio: (item: ChatMessage) => void;
   handleOpenImageMessage: (message: ChatMessage) => void;
   translateAllEnabled: boolean;
-  revealedWarnings: Record<string, boolean>;
   ParticleEffect: React.ComponentType<{ visible: boolean; color: string }>;
 };
 
@@ -91,7 +90,6 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   handlePlayAudio,
   handleOpenImageMessage,
   translateAllEnabled,
-  revealedWarnings,
   ParticleEffect,
 }) => {
   const time = formatTime(item.createdAt);
@@ -108,10 +106,12 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   const isEphemeralImage = isEphemeral && !!item.image;
   const isLockedImage =
     isEphemeralImage && !item.expiresAt && !expiryStartedRef.current.has(item.id);
-  const isModerationPending =
-    item.moderationStatus === 'pending' || (!!item.imagePath && !item.moderationStatus && !isMine);
-  const isFlagged = item.moderationStatus === 'flagged' && item.contentWarning === 'nudity';
-  const isModerationHidden = isModerationPending || (isFlagged && !revealedWarnings[item.id]);
+  const isSensitiveImage = !!item.image && !!item.sensitive;
+  const [sensitiveRevealed, setSensitiveRevealed] = React.useState(false);
+  React.useEffect(() => {
+    setSensitiveRevealed(false);
+  }, [item.id]);
+  const shouldBlurSensitive = isSensitiveImage && !isMine && !sensitiveRevealed;
   const isFading = !!fadingMap[item.id];
   const createdAtMs =
     item.createdAt instanceof Date
@@ -140,6 +140,25 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
       ? translatedText || item.text || ''
       : item.text || '';
   const showTranslating = translateAllEnabled && translating && translatedText === undefined;
+  const handleImagePress = () => {
+    if (!item.image) return;
+    if (shouldBlurSensitive) {
+      Alert.alert('Contenuto sensibile', 'Vuoi visualizzare la foto?', [
+        { text: 'Annulla', style: 'cancel' },
+        {
+          text: 'OK',
+          onPress: () => {
+            setSensitiveRevealed(true);
+            handleOpenImageMessage(item);
+          },
+        },
+      ]);
+      return;
+    }
+    handleOpenImageMessage(item);
+  };
+  const showSensitiveOverlay = shouldBlurSensitive;
+  const showLockedOverlay = isLockedImage && !showSensitiveOverlay;
 
   const fadeAnim = fadeValuesRef.current[item.id];
   const scaleAnim = scaleValuesRef.current[item.id];
@@ -387,7 +406,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
           {item.image ? (
             <Pressable
               style={styles.imageWrapper}
-              onPress={() => handleOpenImageMessage(item)}
+              onPress={handleImagePress}
               disabled={isPendingImage}
             >
               <Image
@@ -395,25 +414,17 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
                 style={[styles.chatImage, isLockedImage && styles.chatImageLocked]}
                 contentFit="cover"
                 cachePolicy="memory-disk"
-                blurRadius={isLockedImage || isModerationHidden ? 20 : 0}
+                blurRadius={showSensitiveOverlay || isLockedImage ? 20 : 0}
               />
-              {isModerationPending ? (
-                <View style={styles.moderationOverlay}>
-                  <View style={styles.moderationBadge}>
-                    <Ionicons name="time-outline" size={18} color="#fff" />
+              {showSensitiveOverlay ? (
+                <View style={styles.imageLockOverlay}>
+                  <View style={styles.imageLockBadge}>
+                    <Ionicons name="eye-off-outline" size={18} color="#fff" />
                   </View>
-                  <Text style={styles.moderationText}>Analisi in corso</Text>
-                  <Text style={styles.moderationSubText}>Riprova tra poco</Text>
+                  <Text style={styles.imageLockText}>Contenuto sensibile - tocca per vedere</Text>
                 </View>
-              ) : isFlagged && !revealedWarnings[item.id] ? (
-                <View style={styles.moderationOverlay}>
-                  <View style={styles.moderationBadge}>
-                    <Ionicons name="warning-outline" size={18} color="#fff" />
-                  </View>
-                  <Text style={styles.moderationText}>Contenuto sensibile</Text>
-                  <Text style={styles.moderationSubText}>Tocca per mostrare</Text>
-                </View>
-              ) : isLockedImage ? (
+              ) : null}
+              {showLockedOverlay ? (
                 <View style={styles.imageLockOverlay}>
                   <View style={styles.imageLockBadge}>
                     <Ionicons name="eye-off-outline" size={18} color="#fff" />
@@ -574,36 +585,6 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 13,
     fontWeight: '700',
-    textAlign: 'center',
-  },
-  moderationOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.65)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-    gap: 8,
-  },
-  moderationBadge: {
-    width: 46,
-    height: 46,
-    borderRadius: 23,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.4)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.18)',
-  },
-  moderationText: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-    textAlign: 'center',
-  },
-  moderationSubText: {
-    color: 'rgba(255,255,255,0.8)',
-    fontSize: 12,
-    fontWeight: '600',
     textAlign: 'center',
   },
   locationMessage: {

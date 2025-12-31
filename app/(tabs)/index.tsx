@@ -4,6 +4,7 @@ import { router } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  ScrollView,
   FlatList,
   Pressable,
   RefreshControl,
@@ -13,7 +14,7 @@ import {
   View,
   useColorScheme,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { Colors } from '@/constants/theme';
 import { useAuth } from '@/hooks/use-auth';
@@ -27,11 +28,21 @@ const FALLBACK_PHOTO =
 export default function CompactGridScreen() {
   const colorScheme = useColorScheme();
   const palette = Colors[colorScheme ?? 'light'];
-  const [search, setSearch] = useState('');
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { data, loading, error, refresh, refreshing } = useProfiles();
   const [blockedIds, setBlockedIds] = useState<string[]>([]);
   const [blockedByIds, setBlockedByIds] = useState<string[]>([]);
+  const [filterMinAge, setFilterMinAge] = useState('');
+  const [filterMaxAge, setFilterMaxAge] = useState('');
+  const [filterMaxDistance, setFilterMaxDistance] = useState('');
+  const [filterCity, setFilterCity] = useState('');
+  const [filterOnline, setFilterOnline] = useState(false);
+  const [filterWithPhoto, setFilterWithPhoto] = useState(false);
+  const [filterRole, setFilterRole] = useState<string | null>(null);
+  const [filterIntent, setFilterIntent] = useState<string | null>(null);
+  const [filterInterests, setFilterInterests] = useState<string[]>([]);
 
   useEffect(() => {
     let active = true;
@@ -78,42 +89,325 @@ export default function CompactGridScreen() {
     });
   }, [data, user?.uid, blockedIds, blockedByIds]);
   const filtered = useMemo(() => {
-    const term = search.trim().toLowerCase();
-    if (!term) return profiles;
-    return profiles.filter((p) => p.name.toLowerCase().includes(term));
-  }, [profiles, search]);
+    let next = profiles;
+    const minAge = Number.parseInt(filterMinAge, 10);
+    const maxAge = Number.parseInt(filterMaxAge, 10);
+    const maxDistance = Number.parseInt(filterMaxDistance, 10);
+    const cityTerm = filterCity.trim().toLowerCase();
+
+    if (!Number.isNaN(minAge)) {
+      next = next.filter((p) => (p.age ?? 0) >= minAge);
+    }
+    if (!Number.isNaN(maxAge)) {
+      next = next.filter((p) => (p.age ?? 0) <= maxAge);
+    }
+    if (!Number.isNaN(maxDistance)) {
+      next = next.filter((p) => (p.distanceKm ?? 0) <= maxDistance);
+    }
+    if (cityTerm) {
+      next = next.filter((p) => (p.city ?? '').toLowerCase().includes(cityTerm));
+    }
+    if (filterOnline) {
+      next = next.filter((p: any) => {
+        const status = (p.status ?? '').toLowerCase();
+        const isOnline = p.isOnline === true || status === 'online';
+        const lastActive = p.lastActiveAt ?? p.lastActive ?? null;
+        if (typeof lastActive === 'number') {
+          const lastActiveMs = lastActive < 1e12 ? lastActive * 1000 : lastActive;
+          return Date.now() - lastActiveMs <= 10 * 60 * 1000;
+        }
+        if (lastActive?.toMillis) {
+          return Date.now() - lastActive.toMillis() <= 10 * 60 * 1000;
+        }
+        if (typeof lastActive?.seconds === 'number') {
+          return Date.now() - lastActive.seconds * 1000 <= 10 * 60 * 1000;
+        }
+        return isOnline;
+      });
+    }
+    if (filterWithPhoto) {
+      next = next.filter((p: any) => {
+        const photo = p.photo;
+        const photos = Array.isArray(p.photos) ? p.photos : [];
+        if (photo && photo !== FALLBACK_PHOTO) return true;
+        return photos.some((uri: string) => uri && uri !== FALLBACK_PHOTO);
+      });
+    }
+    if (filterRole) {
+      next = next.filter((p: any) => (p.role ?? '').toLowerCase() === filterRole);
+    }
+    if (filterIntent) {
+      next = next.filter((p: any) => (p.intent ?? '').toLowerCase() === filterIntent);
+    }
+    if (filterInterests.length > 0) {
+      next = next.filter((p) =>
+        filterInterests.some((interest) => (p.interests ?? []).includes(interest))
+      );
+    }
+    return next;
+  }, [
+    profiles,
+    filterMinAge,
+    filterMaxAge,
+    filterMaxDistance,
+    filterCity,
+    filterOnline,
+    filterWithPhoto,
+    filterRole,
+    filterIntent,
+    filterInterests,
+  ]);
+
+  const roleOptions = ['Top', 'Vers', 'Bottom', 'NS'];
+  const intentOptions = ['Relazione', 'Amicizia', 'Dating'];
+  const interestOptions = [
+    'Viaggi',
+    'Sport',
+    'Nightlife',
+    'Cultura',
+    'Tech',
+    'Arte',
+    'Foodie',
+    'Nature',
+    'Gaming',
+  ];
+
+  const toggleFilterInterest = (interest: string) => {
+    setFilterInterests((prev) =>
+      prev.includes(interest) ? prev.filter((item) => item !== interest) : [...prev, interest]
+    );
+  };
+
+  const resetFilters = () => {
+    setFilterMinAge('');
+    setFilterMaxAge('');
+    setFilterMaxDistance('');
+    setFilterCity('');
+    setFilterOnline(false);
+    setFilterWithPhoto(false);
+    setFilterRole(null);
+    setFilterIntent(null);
+    setFilterInterests([]);
+  };
 
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: palette.background }]} edges={['top']}>
       <View style={[styles.header, { borderBottomColor: palette.border }]}>
         <View style={styles.headerTop}>
           <Text style={styles.brand}>chatIncontri</Text>
-          <Pressable
-            style={styles.profileBtn}
-            onPress={() => {
-              if (user?.uid) {
-                router.push(`/profile/${user.uid}`);
-              } else {
-                router.push('/profile/setup');
-              }
-            }}>
-            <Ionicons name="person-circle-outline" size={26} color={palette.text} />
-          </Pressable>
-        </View>
-        <View
-          style={[
-            styles.searchBox,
-            { borderColor: palette.border, backgroundColor: palette.card },
-          ]}>
-          <TextInput
-            placeholder="Cerca per nickname"
-            placeholderTextColor={palette.muted}
-            value={search}
-            onChangeText={setSearch}
-            style={styles.searchInput}
-          />
+          <View style={styles.headerActions}>
+            <Pressable
+              style={[styles.menuBtn, { borderColor: palette.border }]}
+              onPress={() => setActionsOpen((prev) => !prev)}
+            >
+              <Ionicons name="add" size={22} color={palette.text} />
+            </Pressable>
+            <Pressable
+              style={styles.profileBtn}
+              onPress={() => {
+                if (user?.uid) {
+                  router.push(`/profile/${user.uid}`);
+                } else {
+                  router.push('/profile/setup');
+                }
+              }}>
+              <Ionicons name="person-circle-outline" size={26} color={palette.text} />
+            </Pressable>
+          </View>
         </View>
       </View>
+      {actionsOpen && (
+        <Pressable style={styles.backdrop} onPress={() => setActionsOpen(false)} />
+      )}
+      {actionsOpen && (
+        <View
+          style={[
+            styles.actionsPanel,
+            {
+              borderColor: palette.border,
+              backgroundColor: palette.card,
+              top: insets.top + 8,
+            },
+          ]}
+        >
+          <View style={styles.panelHeader}>
+            <Pressable style={styles.panelClose} onPress={() => setActionsOpen(false)}>
+              <Ionicons name="close" size={20} color={palette.text} />
+            </Pressable>
+          </View>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.actionsRow}
+          >
+            <Pressable
+              style={styles.actionCard}
+              onPress={() => {
+                setActionsOpen(false);
+                router.push('/favorites');
+              }}
+            >
+              <View style={[styles.actionIcon, { backgroundColor: `${palette.accent}18` }]}>
+                <Ionicons name="bookmark" size={22} color={palette.accent} />
+              </View>
+              <Text style={[styles.actionText, { color: palette.text }]}>Preferiti</Text>
+            </Pressable>
+          </ScrollView>
+
+          <View style={styles.filtersHeader}>
+            <Text style={[styles.filtersTitle, { color: palette.text }]}>Filtri</Text>
+            <Pressable onPress={resetFilters}>
+              <Text style={[styles.resetText, { color: palette.muted }]}>Reset</Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.chipsRow}>
+            <Pressable
+              style={[
+                styles.chip,
+                {
+                  borderColor: filterOnline ? palette.accent : palette.border,
+                  backgroundColor: filterOnline ? `${palette.accent}18` : palette.card,
+                },
+              ]}
+              onPress={() => setFilterOnline((prev) => !prev)}
+            >
+              <Text style={[styles.chipText, { color: filterOnline ? palette.accent : palette.text }]}>
+                Online
+              </Text>
+            </Pressable>
+            <Pressable
+              style={[
+                styles.chip,
+                {
+                  borderColor: filterWithPhoto ? palette.tint : palette.border,
+                  backgroundColor: filterWithPhoto ? `${palette.tint}18` : palette.card,
+                },
+              ]}
+              onPress={() => setFilterWithPhoto((prev) => !prev)}
+            >
+              <Text style={[styles.chipText, { color: filterWithPhoto ? palette.tint : palette.text }]}>
+                Con foto
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={styles.filterRow}>
+            <View style={[styles.filterField, { borderColor: palette.border }]}>
+              <TextInput
+                placeholder="Età min"
+                placeholderTextColor={palette.muted}
+                keyboardType="number-pad"
+                value={filterMinAge}
+                onChangeText={setFilterMinAge}
+                style={styles.filterInput}
+              />
+            </View>
+            <View style={[styles.filterField, { borderColor: palette.border }]}>
+              <TextInput
+                placeholder="Età max"
+                placeholderTextColor={palette.muted}
+                keyboardType="number-pad"
+                value={filterMaxAge}
+                onChangeText={setFilterMaxAge}
+                style={styles.filterInput}
+              />
+            </View>
+            <View style={[styles.filterField, { borderColor: palette.border }]}>
+              <TextInput
+                placeholder="Km"
+                placeholderTextColor={palette.muted}
+                keyboardType="number-pad"
+                value={filterMaxDistance}
+                onChangeText={setFilterMaxDistance}
+                style={styles.filterInput}
+              />
+            </View>
+          </View>
+
+          <View style={[styles.filterField, styles.filterFieldFull, { borderColor: palette.border }]}>
+            <Ionicons name="location-outline" size={16} color={palette.muted} />
+            <TextInput
+              placeholder="Città"
+              placeholderTextColor={palette.muted}
+              value={filterCity}
+              onChangeText={setFilterCity}
+              style={styles.filterInput}
+            />
+          </View>
+
+          <View style={styles.chipsRow}>
+            {roleOptions.map((opt) => {
+              const selected = filterRole === opt.toLowerCase();
+              return (
+                <Pressable
+                  key={opt}
+                  style={[
+                    styles.chip,
+                    {
+                      borderColor: selected ? palette.tint : palette.border,
+                      backgroundColor: selected ? `${palette.tint}18` : palette.card,
+                    },
+                  ]}
+                  onPress={() => setFilterRole(selected ? null : opt.toLowerCase())}
+                >
+                  <Text style={[styles.chipText, { color: selected ? palette.tint : palette.text }]}>
+                    {opt}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <View style={styles.chipsRow}>
+            {intentOptions.map((opt) => {
+              const selected = filterIntent === opt.toLowerCase();
+              return (
+                <Pressable
+                  key={opt}
+                  style={[
+                    styles.chip,
+                    {
+                      borderColor: selected ? palette.accent : palette.border,
+                      backgroundColor: selected ? `${palette.accent}18` : palette.card,
+                    },
+                  ]}
+                  onPress={() => setFilterIntent(selected ? null : opt.toLowerCase())}
+                >
+                  <Text
+                    style={[styles.chipText, { color: selected ? palette.accent : palette.text }]}
+                  >
+                    {opt}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+
+          <View style={styles.chipsRow}>
+            {interestOptions.map((opt) => {
+              const selected = filterInterests.includes(opt);
+              return (
+                <Pressable
+                  key={opt}
+                  style={[
+                    styles.chip,
+                    {
+                      borderColor: selected ? palette.tint : palette.border,
+                      backgroundColor: selected ? `${palette.tint}18` : palette.card,
+                    },
+                  ]}
+                  onPress={() => toggleFilterInterest(opt)}
+                >
+                  <Text style={[styles.chipText, { color: selected ? palette.tint : palette.text }]}>
+                    {opt}
+                  </Text>
+                </Pressable>
+              );
+            })}
+          </View>
+        </View>
+      )}
       {loading ? (
         <View style={styles.loading}>
           <ActivityIndicator color={palette.tint} />
@@ -150,21 +444,37 @@ export default function CompactGridScreen() {
           ) : null
         }
         renderItem={({ item }) => {
-          const photoUri = (item as any).photo || (item as any).photos?.[0] || FALLBACK_PHOTO;
+          const candidatePhotos = [
+            (item as any).photo,
+            ...(((item as any).photos ?? []) as string[]),
+          ];
+          const selectedPhoto = candidatePhotos.find(
+            (uri) => uri && uri !== FALLBACK_PHOTO
+          );
+          const hasPhoto = !!selectedPhoto;
           return (
             <Pressable
               style={[styles.card, { borderColor: palette.border }]}
               onPress={() => router.push(`/profile/${item.id}`)}
               android_ripple={{ color: '#00000010' }}>
               <View style={styles.photoWrapper}>
-                <Image
-                  source={{ uri: photoUri }}
-                  style={styles.photo}
-                  contentFit="cover"
-                  transition={150}
-                  cachePolicy="memory-disk"
-                />
-                <View style={styles.photoOverlay} />
+                {hasPhoto ? (
+                  <Image
+                    source={{ uri: selectedPhoto }}
+                    style={styles.photo}
+                    contentFit="cover"
+                    transition={150}
+                    cachePolicy="memory-disk"
+                  />
+                ) : (
+                  <View style={[styles.photoPlaceholder, { backgroundColor: palette.border }]}>
+                    <Ionicons name="image-outline" size={24} color={palette.muted} />
+                    <Text style={[styles.photoPlaceholderText, { color: palette.muted }]}>
+                      Nessuna foto
+                    </Text>
+                  </View>
+                )}
+                {hasPhoto ? <View style={styles.photoOverlay} /> : null}
                 <View style={styles.photoFooter}>
                   <Text style={styles.name} numberOfLines={1}>
                     {item.name}, {item.age}
@@ -188,6 +498,7 @@ export default function CompactGridScreen() {
 const styles = StyleSheet.create({
   screen: {
     flex: 1,
+    position: 'relative',
   },
   header: {
     paddingHorizontal: 16,
@@ -200,6 +511,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  headerActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  menuBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   profileBtn: {
     padding: 6,
@@ -219,24 +543,123 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 14,
   },
-  searchBox: {
+  actionsPanel: {
+    position: 'absolute',
+    left: 12,
+    right: 12,
     borderWidth: 1,
     borderRadius: 12,
-    paddingHorizontal: 12,
+    padding: 12,
+    gap: 12,
+    zIndex: 20,
+    elevation: 12,
+    shadowColor: '#000',
+    shadowOpacity: 0.12,
+    shadowOffset: { width: 0, height: 6 },
+    shadowRadius: 14,
+  },
+  backdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.18)',
+    zIndex: 10,
+  },
+  panelClose: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.06)',
+  },
+  panelHeader: {
+    alignItems: 'flex-end',
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingRight: 6,
+  },
+  actionButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
     paddingVertical: 10,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.04)',
+    width: '100%',
   },
-  searchInput: {
+  actionCard: {
+    width: 96,
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.04)',
+    paddingHorizontal: 8,
+  },
+  actionIcon: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionText: {
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  filtersHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  filtersTitle: {
     fontSize: 15,
+    fontWeight: '800',
   },
-  loading: {
+  resetText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  filterRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  filterField: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    paddingHorizontal: 16,
+    backgroundColor: '#fff',
+  },
+  filterFieldFull: {
+    flex: 1,
+  },
+  filterInput: {
+    flex: 1,
+    fontSize: 14,
+  },
+  chipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  chip: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingHorizontal: 12,
     paddingVertical: 6,
   },
-  loadingText: {
-    fontSize: 14,
+  chipText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
   listContent: {
     paddingHorizontal: 12,
@@ -268,6 +691,16 @@ const styles = StyleSheet.create({
   photo: {
     width: '100%',
     height: '100%',
+  },
+  photoPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  photoPlaceholderText: {
+    fontSize: 12,
+    fontWeight: '600',
   },
   name: {
     color: '#fff',

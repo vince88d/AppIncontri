@@ -1,7 +1,7 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { getFocusedRouteNameFromRoute } from '@react-navigation/native';
 import { Redirect, Tabs } from 'expo-router';
-import { collection, onSnapshot, query, where } from 'firebase/firestore';
+import { collection, doc, onSnapshot, query, where } from 'firebase/firestore';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, Text, View, useColorScheme } from 'react-native';
 
@@ -16,6 +16,8 @@ export default function TabsLayout() {
   const { user, loading } = useAuth();
   const { profile, loading: loadingProfile } = useProfile(user?.uid);
   const [unreadCount, setUnreadCount] = useState(0);
+  const [interestsUnread, setInterestsUnread] = useState(0);
+  const [tapResponsesUnread, setTapResponsesUnread] = useState(0);
 
   useEffect(() => {
     if (!user?.uid) return;
@@ -30,6 +32,29 @@ export default function TabsLayout() {
         return updated > read;
       }).length;
       setUnreadCount(count);
+    });
+    return unsub;
+  }, [user?.uid]);
+
+  useEffect(() => {
+    if (!user?.uid) return;
+    const unsub = onSnapshot(doc(db, 'profiles', user.uid), (snap) => {
+      if (!snap.exists()) {
+        setInterestsUnread(0);
+        setTapResponsesUnread(0);
+        return;
+      }
+      const data = snap.data() as any;
+      const interestedBy = Array.isArray(data.interestedBy) ? data.interestedBy : [];
+      const interestsSeen = Array.isArray(data.interestsSeen) ? data.interestsSeen : [];
+      const unread = interestedBy.filter((id: string) => !interestsSeen.includes(id)).length;
+      setInterestsUnread(unread);
+      const rawTapResponses =
+        data.tapResponses && typeof data.tapResponses === 'object' ? data.tapResponses : {};
+      const tapResponseIds = Object.keys(rawTapResponses);
+      const tapResponsesSeen = Array.isArray(data.tapResponsesSeen) ? data.tapResponsesSeen : [];
+      const tapUnread = tapResponseIds.filter((id: string) => !tapResponsesSeen.includes(id)).length;
+      setTapResponsesUnread(tapUnread);
     });
     return unsub;
   }, [user?.uid]);
@@ -55,6 +80,8 @@ export default function TabsLayout() {
   if (!profile) {
     return <Redirect href="/profile/setup" />;
   }
+
+  const totalUnread = unreadCount + interestsUnread + tapResponsesUnread;
 
   return (
     <Tabs
@@ -89,10 +116,11 @@ export default function TabsLayout() {
           title: 'Messaggi',
           tabBarLabel: 'Messaggi',
           href: '/messages',
+          unmountOnBlur: true,
           tabBarIcon: ({ color, size }) => (
             <View>
               <Ionicons name="mail" color={color} size={size} />
-              {unreadCount > 0 && (
+              {totalUnread > 0 && (
                 <View
                   style={{
                     position: 'absolute',
@@ -107,7 +135,7 @@ export default function TabsLayout() {
                     paddingHorizontal: 4,
                   }}>
                   <Text style={{ color: '#fff', fontSize: 11, fontWeight: '700' }}>
-                    {unreadCount > 99 ? '99+' : unreadCount}
+                    {totalUnread > 99 ? '99+' : totalUnread}
                   </Text>
                 </View>
               )}
@@ -128,6 +156,12 @@ export default function TabsLayout() {
       />
       <Tabs.Screen
         name="settings/blocked"
+        options={{
+          href: null,
+        }}
+      />
+      <Tabs.Screen
+        name="favorites/index"
         options={{
           href: null,
         }}

@@ -1,25 +1,25 @@
 import { Platform } from 'react-native';
 
-export const PastelPalette = ['#FADADD', '#FFE5B4', '#FFF6B7', '#DDF3F5', '#E4D8F4', '#FFDFF6'];
+export const PastelPalette = ['#98FF98', '#8A2BE2', '#FF7F50', '#DDF3F5', '#E4D8F4', '#FFDFF6'];
 
 export const Colors = {
   light: {
-    text: '#111827',
-    background: '#f8fafc',
-    card: '#ffffff',
-    muted: '#6b7280',
-    border: '#e5e7eb',
-    tint: '#ff9fb7',
-    accent: '#9bb8ff',
+    text: '#2D2D2D',
+    background: '#F8F9FA',
+    card: '#FDFDFD',
+    muted: '#5F5F5F',
+    border: '#E1E4E8',
+    tint: '#FF7F50',
+    accent: '#8A2BE2',
   },
   dark: {
-    text: '#E5E7EB',
-    background: '#0d1117',
-    card: '#151922',
-    muted: '#9CA3AF',
-    border: '#1f2430',
-    tint: '#ff9fb7',
-    accent: '#9bb8ff',
+    text: '#F4F4F4',
+    background: '#121212',
+    card: '#1A1A1A',
+    muted: '#9A9A9A',
+    border: '#2A2A2A',
+    tint: '#FF7F50',
+    accent: '#8A2BE2',
   },
 };
 

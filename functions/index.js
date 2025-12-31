@@ -16,6 +16,57 @@ const isNudity = (safeSearch) => {
   );
 };
 
+const parseDataUrl = (dataUrl) => {
+  if (typeof dataUrl !== 'string') return null;
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  return { mime: match[1], content: match[2] };
+};
+
+const buildModerationUpdate = (safeSearch, flagged) => ({
+  moderationStatus: flagged ? 'flagged' : 'ok',
+  contentWarning: flagged ? 'nudity' : null,
+  moderation: {
+    adult: safeSearch?.adult || 'UNKNOWN',
+    racy: safeSearch?.racy || 'UNKNOWN',
+    medical: safeSearch?.medical || 'UNKNOWN',
+    spoof: safeSearch?.spoof || 'UNKNOWN',
+    violence: safeSearch?.violence || 'UNKNOWN',
+  },
+  moderationUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+});
+
+const buildModerationResponse = (safeSearch, flagged) => ({
+  moderationStatus: flagged ? 'flagged' : 'ok',
+  contentWarning: flagged ? 'nudity' : null,
+  moderation: {
+    adult: safeSearch?.adult || 'UNKNOWN',
+    racy: safeSearch?.racy || 'UNKNOWN',
+    medical: safeSearch?.medical || 'UNKNOWN',
+    spoof: safeSearch?.spoof || 'UNKNOWN',
+    violence: safeSearch?.violence || 'UNKNOWN',
+  },
+});
+
+exports.moderateImageDataUrl = functions.https.onCall(async (data) => {
+  const dataUrl = data?.dataUrl;
+  if (!dataUrl || typeof dataUrl !== 'string') {
+    throw new functions.https.HttpsError('invalid-argument', 'Missing dataUrl.');
+  }
+
+  const parsed = parseDataUrl(dataUrl);
+  if (!parsed) {
+    throw new functions.https.HttpsError('invalid-argument', 'Invalid dataUrl.');
+  }
+
+  const [result] = await visionClient.safeSearchDetection({
+    image: { content: parsed.content },
+  });
+  const safe = result.safeSearchAnnotation || {};
+  const flagged = isNudity(safe);
+  return buildModerationResponse(safe, flagged);
+});
+
 exports.moderateImage = functions.storage.object().onFinalize(async (object) => {
   const filePath = object.name;
   if (!filePath) return null;
@@ -31,18 +82,7 @@ exports.moderateImage = functions.storage.object().onFinalize(async (object) => 
   );
   const safe = result.safeSearchAnnotation || {};
   const flagged = isNudity(safe);
-  const moderationUpdate = {
-    moderationStatus: flagged ? 'flagged' : 'ok',
-    contentWarning: flagged ? 'nudity' : null,
-    moderation: {
-      adult: safe.adult || 'UNKNOWN',
-      racy: safe.racy || 'UNKNOWN',
-      medical: safe.medical || 'UNKNOWN',
-      spoof: safe.spoof || 'UNKNOWN',
-      violence: safe.violence || 'UNKNOWN',
-    },
-    moderationUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
-  };
+  const moderationUpdate = buildModerationUpdate(safe, flagged);
 
   if (kind === 'chat') {
     const chatId = metadata.chatId;
@@ -86,6 +126,35 @@ exports.moderateImage = functions.storage.object().onFinalize(async (object) => 
 
   return null;
 });
+
+exports.moderateChatImageDataUrl = functions.firestore
+  .document('chats/{chatId}/messages/{messageId}')
+  .onCreate(async (snap) => {
+    const data = snap.data() || {};
+    const image = data.image;
+    if (!image || typeof image !== 'string') return null;
+    if (!image.startsWith('data:')) return null;
+    if (data.moderationStatus && data.moderationStatus !== 'pending') return null;
+
+    const parsed = parseDataUrl(image);
+    if (!parsed) {
+      await snap.ref.set(buildModerationUpdate({}, true), { merge: true });
+      return null;
+    }
+
+    try {
+      const [result] = await visionClient.safeSearchDetection({
+        image: { content: parsed.content },
+      });
+      const safe = result.safeSearchAnnotation || {};
+      const flagged = isNudity(safe);
+      await snap.ref.set(buildModerationUpdate(safe, flagged), { merge: true });
+    } catch (e) {
+      console.error('moderateChatImageDataUrl error', e);
+      await snap.ref.set(buildModerationUpdate({}, true), { merge: true });
+    }
+    return null;
+  });
 
 exports.cleanupChatImageOnDelete = functions.firestore
   .document('chats/{chatId}/messages/{messageId}')

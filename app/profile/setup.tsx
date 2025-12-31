@@ -33,14 +33,14 @@ export default function ProfileSetupScreen() {
   const [name, setName] = useState('');
   const [age, setAge] = useState('');
   const [city, setCity] = useState('');
-  const [photos, setPhotos] = useState<string[]>([FALLBACK_PHOTO]);
+  const [photos, setPhotos] = useState<string[]>([]);
   const [bio, setBio] = useState('');
 
   const uploadProfilePhotos = async () => {
-    if (!user) return { urls: [FALLBACK_PHOTO], meta: [] };
+    if (!user) return { urls: [] as string[] };
     const selected = photos.filter((uri) => uri && uri !== FALLBACK_PHOTO);
     if (!selected.length) {
-      return { urls: [FALLBACK_PHOTO], meta: [] };
+      return { urls: [] as string[] };
     }
 
     const uploads = [];
@@ -64,12 +64,7 @@ export default function ProfileSetupScreen() {
     }
 
     const urls = uploads.map((item) => item.url);
-    const meta = uploads.map((item) =>
-      item.path
-        ? { path: item.path, moderationStatus: 'pending', contentWarning: null }
-        : {}
-    );
-    return { urls, meta };
+    return { urls };
   };
 
   useEffect(() => {
@@ -87,16 +82,16 @@ export default function ProfileSetupScreen() {
     }
     setLoading(true);
     try {
-      const { urls, meta } = await uploadProfilePhotos();
+      const { urls } = await uploadProfilePhotos();
       await setDoc(doc(db, 'profiles', user.uid), {
         name: name.trim(),
         age: ageNum,
         city: city.trim() || 'N/D',
         distanceKm: 0, // calcoleremo via GPS più avanti
-        photo: urls[0] ?? FALLBACK_PHOTO,
-        photos: urls.length ? urls : [FALLBACK_PHOTO],
-        photoMeta: meta,
+        photo: urls[0] ?? '',
+        photos: urls.length ? urls : [],
         interests: [],
+        interestsSeen: [],
         bio: bio.trim(),
         jobTitle: '',
       });
@@ -131,7 +126,7 @@ export default function ProfileSetupScreen() {
         }
         return a.uri;
       });
-      setPhotos(uris.length ? uris : [FALLBACK_PHOTO]);
+      setPhotos(uris.length ? uris : []);
     }
   };
 

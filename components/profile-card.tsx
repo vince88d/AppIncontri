@@ -17,11 +17,18 @@ const FALLBACK_PHOTO =
 export function ProfileCard({ profile, onLike, onPass }: Props) {
   const colorScheme = useColorScheme();
   const palette = Colors[colorScheme ?? 'light'];
-  const photoUri = profile.photo || profile.photos?.[0] || FALLBACK_PHOTO;
-  const photoIndex = profile.photos?.findIndex((p) => p === photoUri) ?? 0;
-  const photoMeta = profile.photoMeta?.[photoIndex];
-  const isFlagged =
-    photoMeta?.moderationStatus === 'flagged' && photoMeta?.contentWarning === 'nudity';
+  const candidatePhotos = [profile.photo, ...(profile.photos ?? [])].filter(Boolean);
+  const selectedPhoto = candidatePhotos.find((uri) => uri && uri !== FALLBACK_PHOTO);
+  const hasPhoto = !!selectedPhoto;
+  const city = (profile.city ?? '').trim();
+  const normalizedCity = city.replace(/[^a-z0-9]/gi, '').toLowerCase();
+  const hasCity = !!city && normalizedCity !== 'nd';
+  const jobTitle = (profile.jobTitle ?? '').trim();
+  const hasJobTitle = !!jobTitle;
+  const bio = (profile.bio ?? '').trim();
+  const hasBio = !!bio;
+  const interests = Array.isArray(profile.interests) ? profile.interests.filter(Boolean) : [];
+  const hasInterests = interests.length > 0;
 
   return (
     <View
@@ -39,57 +46,63 @@ export function ProfileCard({ profile, onLike, onPass }: Props) {
           <Text style={styles.distanceText}>{profile.distanceKm} km</Text>
         </View>
         <View style={styles.statusDot} />
-        <Image
-          source={{ uri: photoUri }}
-          style={styles.photo}
-          contentFit="cover"
-          transition={200}
-          cachePolicy="memory-disk"
-          blurRadius={isFlagged ? 20 : 0}
-        />
-        {isFlagged ? (
-          <View style={styles.photoWarningOverlay}>
-            <View style={styles.photoWarningBadge}>
-              <Ionicons name="warning-outline" size={18} color="#fff" />
-            </View>
-            <Text style={styles.photoWarningText}>Foto segnalata</Text>
+        {hasPhoto ? (
+          <Image
+            source={{ uri: selectedPhoto }}
+            style={styles.photo}
+            contentFit="cover"
+            transition={200}
+            cachePolicy="memory-disk"
+          />
+        ) : (
+          <View style={[styles.photoPlaceholder, { backgroundColor: palette.border }]}>
+            <Ionicons name="image-outline" size={32} color={palette.muted} />
+            <Text style={[styles.photoPlaceholderText, { color: palette.muted }]}>
+              Nessuna foto
+            </Text>
           </View>
-        ) : null}
+        )}
         <View style={styles.photoOverlay}>
           <Text style={styles.name}>
             {profile.name}, {profile.age}
           </Text>
-          <Text style={styles.location}>{profile.city}</Text>
+          {hasCity && <Text style={styles.location}>{city}</Text>}
         </View>
       </View>
 
       <View style={styles.body}>
-        <View style={styles.metaRow}>
-          <Ionicons name="briefcase" size={16} color={palette.muted} />
-          <Text style={styles.job} numberOfLines={1}>
-            {profile.jobTitle ?? 'Professione non indicata'}
+        {hasJobTitle && (
+          <View style={styles.metaRow}>
+            <Ionicons name="briefcase" size={16} color={palette.muted} />
+            <Text style={styles.job} numberOfLines={1}>
+              {jobTitle}
+            </Text>
+          </View>
+        )}
+        {hasBio && (
+          <Text style={[styles.bio, { color: palette.muted }]} numberOfLines={3}>
+            {bio}
           </Text>
-        </View>
-        <Text style={[styles.bio, { color: palette.muted }]} numberOfLines={3}>
-          {profile.bio}
-        </Text>
+        )}
 
-        <View style={styles.tagsRow}>
-          {profile.interests.map((interest) => (
-            <View
-              key={interest}
-              style={[
-                styles.tag,
-                {
-                  backgroundColor:
-                    PastelPalette[profile.interests.indexOf(interest) % PastelPalette.length],
-                  borderColor: palette.border,
-                },
-              ]}>
-              <Text style={styles.tagText}>{interest}</Text>
-            </View>
-          ))}
-        </View>
+        {hasInterests && (
+          <View style={styles.tagsRow}>
+            {interests.map((interest, index) => (
+              <View
+                key={interest}
+                style={[
+                  styles.tag,
+                  {
+                    backgroundColor: PastelPalette[index % PastelPalette.length],
+                    borderColor: palette.border,
+                  },
+                ]}
+              >
+                <Text style={styles.tagText}>{interest}</Text>
+              </View>
+            ))}
+          </View>
+        )}
 
         <View style={styles.actionsRow}>
           <Pressable
@@ -129,6 +142,17 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
+  photoPlaceholder: {
+    width: '100%',
+    height: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  photoPlaceholderText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
   photoOverlay: {
     position: 'absolute',
     left: 16,
@@ -138,30 +162,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderRadius: 12,
     backgroundColor: 'rgba(0,0,0,0.35)',
-  },
-  photoWarningOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.55)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 10,
-    paddingHorizontal: 16,
-  },
-  photoWarningBadge: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.3)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.12)',
-  },
-  photoWarningText: {
-    color: '#fff',
-    fontSize: 13,
-    fontWeight: '700',
-    textAlign: 'center',
   },
   name: {
     color: '#fff',
