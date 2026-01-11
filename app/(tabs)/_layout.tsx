@@ -87,7 +87,10 @@ export default function TabsLayout() {
     <Tabs
       screenOptions={({ route }) => {
         const focused = getFocusedRouteNameFromRoute(route) ?? route.name;
-        const hideTab = route.name === 'messages';
+        const focusedName = typeof focused === 'string' ? focused.toLowerCase() : '';
+        const hideTab =
+          route.name === 'messages' ||
+          (route.name === 'groups' && focusedName.includes('live'));
         return {
           headerShown: false,
           tabBarActiveTintColor: palette.tint,

@@ -2,13 +2,22 @@ import * as ScreenCapture from 'expo-screen-capture';
 import { Stack } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useRef } from 'react';
-import { Alert, useColorScheme } from 'react-native';
+import { Alert, Platform, useColorScheme } from 'react-native';
 
 import { Colors } from '@/constants/theme';
 
 export const unstable_settings = {
   initialRouteName: '(tabs)',
 };
+
+if (Platform.OS !== 'web' && typeof window !== 'undefined') {
+  try {
+    const { registerGlobals } = require('@livekit/react-native');
+    registerGlobals();
+  } catch {
+    // LiveKit not available yet.
+  }
+}
 
 export default function RootLayout() {
   const colorScheme = useColorScheme();
@@ -51,7 +60,7 @@ export default function RootLayout() {
     <>
       <Stack screenOptions={{ headerShown: false }}>
         <Stack.Screen name="(tabs)" />
-        <Stack.Screen name="auth" />
+        <Stack.Screen name="auth/index" />
         <Stack.Screen name="profile/[id]" />
         <Stack.Screen name="profile/setup" />
       </Stack>
