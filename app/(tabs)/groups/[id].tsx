@@ -56,9 +56,7 @@ type GroupMeta = {
   owner?: string;
   live?: {
     active?: boolean;
-    hostId?: string;
-    hostName?: string;
-    hostPhoto?: string;
+    count?: number;
     startedAt?: any;
   };
 };
@@ -328,14 +326,14 @@ export default function GroupChatScreen() {
         await startGroupLive({ groupId });
         router.push({
           pathname: '/groups/live/[id]',
-          params: { id: groupId, title: groupTitle, host: '1' },
+          params: { id: groupId, title: groupTitle, host: '1', hostId: user.uid },
         });
       } catch (error: any) {
         const code = error?.code || '';
         if (code === 'functions/already-exists' || error?.message?.includes('live-active')) {
           router.push({
             pathname: '/groups/live/[id]',
-            params: { id: groupId, title: groupTitle, host: '1' },
+            params: { id: groupId, title: groupTitle, host: '1', hostId: user.uid },
           });
           return;
         }
@@ -353,23 +351,6 @@ export default function GroupChatScreen() {
       }
     };
 
-    if (liveActive) {
-      if (isWeb) {
-        const confirmed = confirmMessage(
-          'Live in corso',
-          'Vuoi andare in live anche tu?'
-        );
-        if (!confirmed) return;
-        void openHostLive();
-        return;
-      }
-      Alert.alert('Live in corso', 'Vuoi andare in live anche tu?', [
-        { text: 'Annulla', style: 'cancel' },
-        { text: 'Vai in live', onPress: () => void openHostLive() },
-      ]);
-      return;
-    }
-
     if (isWeb) {
       const confirmed = confirmMessage('Avvia live', 'Vuoi avviare la live per il gruppo?');
       if (!confirmed) return;
@@ -384,7 +365,6 @@ export default function GroupChatScreen() {
     groupId,
     user?.uid,
     joined,
-    liveActive,
     groupTitle,
     startGroupLive,
     router,
@@ -740,7 +720,7 @@ export default function GroupChatScreen() {
                   <Text style={[styles.membersModalSubtitle, { color: palette.muted }]}>
                     {joined ? `${participantsCount} online ora` : 'Solo membri presenti'}
                   </Text>
-                  {liveActive ? (
+                  {liveHostIds.length ? (
                     <Text style={[styles.membersModalHint, { color: palette.muted }]}>
                       Tocca chi e in live per partecipare.
                     </Text>
@@ -766,7 +746,7 @@ export default function GroupChatScreen() {
                     contentContainerStyle={styles.membersList}
                     renderItem={({ item }) => {
                       const initial = item.name?.trim()?.[0]?.toUpperCase() ?? '?';
-                      const isLiveMember = liveActive && liveHostSet.has(item.id);
+                      const isLiveMember = liveHostSet.has(item.id);
                       const row = (
                         <View
                           style={[
@@ -813,7 +793,7 @@ export default function GroupChatScreen() {
                           onPress={() =>
                             router.push({
                               pathname: '/groups/live/[id]',
-                              params: { id: groupId, title: groupTitle },
+                              params: { id: groupId, title: groupTitle, hostId: item.id },
                             })
                           }
                         >

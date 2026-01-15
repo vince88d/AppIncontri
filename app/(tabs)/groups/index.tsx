@@ -36,8 +36,7 @@ type Group = {
   members?: number;
   live?: {
     active?: boolean;
-    hostName?: string;
-    hostId?: string;
+    count?: number;
   };
 };
 

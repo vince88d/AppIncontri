@@ -162,10 +162,11 @@ function LiveRoomNative({ token, liveUrl, isHost }: LiveRoomProps) {
 }
 
 export default function GroupLiveScreen() {
-  const { id: groupIdParam, title, host } = useLocalSearchParams<{
+  const { id: groupIdParam, title, host, hostId } = useLocalSearchParams<{
     id: string;
     title?: string;
     host?: string;
+    hostId?: string;
   }>();
   const groupId = groupIdParam ? String(groupIdParam) : '';
   const groupTitle = title || 'Live di gruppo';
@@ -173,6 +174,10 @@ export default function GroupLiveScreen() {
 
   const { user } = useAuth();
   const { profile } = useProfile(user?.uid);
+  const targetHostId = useMemo(() => {
+    if (isHost) return user?.uid ? String(user.uid) : '';
+    return hostId ? String(hostId) : '';
+  }, [isHost, hostId, user?.uid]);
 
   const [token, setToken] = useState<string | null>(null);
   const [liveUrl, setLiveUrl] = useState<string | null>(null);
@@ -182,9 +187,15 @@ export default function GroupLiveScreen() {
   const [sending, setSending] = useState(false);
   const [liveMessages, setLiveMessages] = useState<LiveMessage[]>([]);
   const [chatOpen, setChatOpen] = useState(true);
+  const [liveCreatorId, setLiveCreatorId] = useState<string | null>(null);
+  const [unreadCount, setUnreadCount] = useState(0);
   const stopRequested = useRef(false);
   const messagesRef = useRef<any>(null);
   const autoScrollRef = useRef(true);
+  const chatOpenRef = useRef(true);
+  const lastMessageIdRef = useRef<string | null>(null);
+  const initializedMessagesRef = useRef(false);
+  const latestMessagesRef = useRef<LiveMessage[]>([]);
   const scrollToBottom = (animated = true) => {
     messagesRef.current?.scrollToEnd?.({ animated });
   };
@@ -201,6 +212,11 @@ export default function GroupLiveScreen() {
 
   useEffect(() => {
     if (!groupId) return;
+    if (!targetHostId) {
+      setError('Seleziona una live per entrare.');
+      setLoading(false);
+      return;
+    }
     let active = true;
     setLoading(true);
     setError(null);
@@ -209,6 +225,7 @@ export default function GroupLiveScreen() {
         const response = await getGroupLiveToken({
           groupId,
           role: isHost ? 'host' : 'viewer',
+          hostId: targetHostId,
         });
         const data = response.data as LiveKitTokenResponse;
         if (!data?.token) {
@@ -244,27 +261,88 @@ export default function GroupLiveScreen() {
     return () => {
       active = false;
     };
-  }, [groupId, isHost, getGroupLiveToken, livekitUrl]);
+  }, [groupId, isHost, targetHostId, getGroupLiveToken, livekitUrl]);
 
   useEffect(() => {
-    if (!groupId) {
+    if (!groupId || !targetHostId) {
+      setLiveCreatorId(null);
+      return;
+    }
+    setLiveCreatorId(targetHostId);
+    const ref = doc(db, 'groupRooms', groupId, 'lives', targetHostId);
+    const unsub = onSnapshot(ref, (snap) => {
+      if (!snap.exists()) {
+        setLiveCreatorId(null);
+        return;
+      }
+      const data = snap.data() as any;
+      setLiveCreatorId(data.creatorId || data.hostId || targetHostId);
+    });
+    return unsub;
+  }, [groupId, targetHostId]);
+
+  useEffect(() => {
+    if (!groupId || !targetHostId) {
       setLiveMessages([]);
       return;
     }
     const q = query(
-      collection(db, 'groupRooms', groupId, 'liveMessages'),
+      collection(db, 'groupRooms', groupId, 'lives', targetHostId, 'messages'),
       orderBy('createdAt', 'asc'),
       limit(100)
     );
     const unsub = onSnapshot(q, (snap) => {
       const items = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) }));
+      latestMessagesRef.current = items;
       setLiveMessages(items);
       if (items.length && autoScrollRef.current) {
         requestAnimationFrame(() => scrollToBottom(false));
       }
+      if (!items.length) {
+        if (!initializedMessagesRef.current) {
+          initializedMessagesRef.current = true;
+        }
+        lastMessageIdRef.current = null;
+        return;
+      }
+      const lastId = items[items.length - 1]?.id ?? null;
+      if (!initializedMessagesRef.current) {
+        initializedMessagesRef.current = true;
+        lastMessageIdRef.current = lastId;
+        return;
+      }
+      if (chatOpenRef.current) {
+        lastMessageIdRef.current = lastId;
+        return;
+      }
+      const prevId = lastMessageIdRef.current;
+      if (!prevId) {
+        lastMessageIdRef.current = lastId;
+        return;
+      }
+      const prevIndex = items.findIndex((item) => item.id === prevId);
+      const newCount = prevIndex === -1 ? items.length : items.length - prevIndex - 1;
+      if (newCount > 0) {
+        setUnreadCount((prev) => prev + newCount);
+        lastMessageIdRef.current = lastId;
+      }
     });
     return unsub;
-  }, [groupId]);
+  }, [groupId, targetHostId]);
+
+  useEffect(() => {
+    chatOpenRef.current = chatOpen;
+    const lastId = latestMessagesRef.current.length
+      ? latestMessagesRef.current[latestMessagesRef.current.length - 1].id
+      : null;
+    lastMessageIdRef.current = lastId;
+    if (chatOpen) {
+      setUnreadCount(0);
+    }
+    if (!chatOpen) {
+      setUnreadCount(0);
+    }
+  }, [chatOpen]);
 
   useEffect(() => {
     if (!chatOpen || !liveMessages.length) return;
@@ -275,7 +353,7 @@ export default function GroupLiveScreen() {
   }, [chatOpen, liveMessages.length]);
 
   useEffect(() => {
-    if (!groupId || !user?.uid) return;
+    if (!groupId || !user?.uid || !isHost) return;
     const presenceRef = doc(db, 'groupRooms', groupId, 'livePresence', user.uid);
     let active = true;
     const touchPresence = async () => {
@@ -285,7 +363,7 @@ export default function GroupLiveScreen() {
       try {
         await setDoc(
           presenceRef,
-          { activeAt: serverTimestamp(), name, photo, role: isHost ? 'host' : 'viewer' },
+          { activeAt: serverTimestamp(), name, photo, role: 'host' },
           { merge: true }
         );
       } catch {
@@ -310,7 +388,7 @@ export default function GroupLiveScreen() {
   }, [groupId, isHost, stopGroupLive]);
 
   const handleSend = async () => {
-    if (!groupId || !user?.uid) return;
+    if (!groupId || !user?.uid || !targetHostId) return;
     const trimmed = chatInput.trim();
     if (!trimmed || sending) return;
     setSending(true);
@@ -325,12 +403,15 @@ export default function GroupLiveScreen() {
         },
         { merge: true }
       );
-      await addDoc(collection(db, 'groupRooms', groupId, 'liveMessages'), {
+      await addDoc(
+        collection(db, 'groupRooms', groupId, 'lives', targetHostId, 'messages'),
+        {
         text: trimmed,
         senderId: user.uid,
         senderName,
         createdAt: serverTimestamp(),
-      });
+        }
+      );
     } catch {
       setChatInput(trimmed);
     } finally {
@@ -350,7 +431,11 @@ export default function GroupLiveScreen() {
         </View>
         {isHost ? (
           <Pressable
-            style={[styles.endButton, { backgroundColor: '#ff3b30' }]}
+            style={({ pressed }) => [
+              styles.endButton,
+              { backgroundColor: '#ff3b30' },
+              pressed ? styles.endButtonPressed : null,
+            ]}
             onPress={async () => {
               if (!groupId || stopRequested.current) return;
               stopRequested.current = true;
@@ -411,26 +496,25 @@ export default function GroupLiveScreen() {
                   data={liveMessages}
                   keyExtractor={(item) => item.id}
                   renderItem={({ item }) => {
-                    const initial = (item.senderName || 'U').trim().charAt(0).toUpperCase();
+                    const isCreator = !!liveCreatorId && item.senderId === liveCreatorId;
                     return (
                       <View style={styles.liveMessageRow}>
-                        <View style={styles.liveMessageHeader}>
-                          <View style={styles.liveAvatar}>
-                            <Text style={styles.liveAvatarText}>{initial}</Text>
-                          </View>
-                          <View style={styles.liveNameStack}>
-                            <Text style={styles.liveMessageName} numberOfLines={1}>
-                              {item.senderName || 'Utente'}
-                            </Text>
-                            <View style={styles.liveNameDivider} />
-                          </View>
-                        </View>
-                      <View style={styles.liveMessageBubble}>
+                        <Text
+                          style={[
+                            styles.liveMessageName,
+                            isCreator ? styles.liveMessageNameCreator : null,
+                          ]}
+                          numberOfLines={1}
+                        >
+                          {item.senderName || 'Utente'}
+                          {isCreator ? (
+                            <Text style={styles.liveMessageCreatorTag}> (creator)</Text>
+                          ) : null}
+                        </Text>
                         <Text style={styles.liveMessageText}>{item.text}</Text>
                       </View>
-                    </View>
-                  );
-                }}
+                    );
+                  }}
                   contentContainerStyle={styles.liveMessagesList}
                   style={styles.liveMessagesBody}
                   showsVerticalScrollIndicator={false}
@@ -455,6 +539,13 @@ export default function GroupLiveScreen() {
             <Pressable style={styles.chatToggle} onPress={() => setChatOpen(true)}>
               <Ionicons name="chatbubbles" size={16} color="#fff" />
               <Text style={styles.chatToggleText}>Mostra chat</Text>
+              {unreadCount > 0 ? (
+                <View style={styles.chatToggleBadge}>
+                  <Text style={styles.chatToggleBadgeText}>
+                    {unreadCount > 99 ? '99+' : unreadCount}
+                  </Text>
+                </View>
+              ) : null}
             </Pressable>
           ) : null}
         </View>
@@ -531,6 +622,9 @@ const styles = StyleSheet.create({
     paddingVertical: 8,
     borderRadius: 999,
   },
+  endButtonPressed: {
+    opacity: 0.7,
+  },
   endButtonText: {
     color: '#fff',
     fontSize: 12,
@@ -591,59 +685,29 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   liveMessagesList: {
-    gap: 8,
+    gap: 10,
     paddingBottom: 36,
   },
   liveMessageRow: {
-    gap: 6,
-  },
-  liveMessageHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  liveAvatar: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.12)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-  },
-  liveAvatarText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#fff',
-  },
-  liveNameStack: {
-    flex: 1,
-    gap: 4,
-  },
-  liveNameDivider: {
-    height: 1,
-    width: '60%',
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    gap: 3,
   },
   liveMessageName: {
     fontSize: 12,
     fontWeight: '700',
-    letterSpacing: 0.4,
-    color: '#fff',
+    color: '#9fd9ff',
   },
-  liveMessageBubble: {
-    paddingVertical: 8,
-    paddingHorizontal: 10,
-    borderRadius: 12,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.12)',
+  liveMessageNameCreator: {
+    color: '#ffd166',
+  },
+  liveMessageCreatorTag: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: '#ffd166',
   },
   liveMessageText: {
     fontSize: 14,
     lineHeight: 20,
-    fontWeight: '500',
+    fontWeight: '400',
     color: '#fff',
   },
   chatBar: {
@@ -697,6 +761,20 @@ const styles = StyleSheet.create({
   },
   chatToggleText: {
     fontSize: 12,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  chatToggleBadge: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ff3b30',
+  },
+  chatToggleBadgeText: {
+    fontSize: 10,
     fontWeight: '700',
     color: '#fff',
   },

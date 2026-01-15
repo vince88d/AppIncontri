@@ -73,23 +73,10 @@ const isPresenceActiveAt = (activeAt) => {
   return Date.now() - toMillis(activeAt) <= PRESENCE_ACTIVE_MS;
 };
 
-const getActiveLiveHosts = async (groupRef, excludeUserId) => {
-  const cutoff = admin.firestore.Timestamp.fromDate(
-    new Date(Date.now() - PRESENCE_ACTIVE_MS)
-  );
-  const snap = await groupRef
-    .collection('livePresence')
-    .where('activeAt', '>', cutoff)
-    .get();
-  return snap.docs
-    .map((docSnap) => ({ id: docSnap.id, ...(docSnap.data() || {}) }))
-    .filter((item) => (item.role || 'host') === 'host')
-    .filter((item) => (!excludeUserId ? true : item.id !== excludeUserId));
-};
-
-const hasActiveLiveHostPresence = async (groupId, userId) => {
+const isLiveHostActive = async (groupId, hostId) => {
+  if (!hostId) return false;
   const presenceSnap = await db
-    .doc(`groupRooms/${groupId}/livePresence/${userId}`)
+    .doc(`groupRooms/${groupId}/livePresence/${hostId}`)
     .get();
   if (!presenceSnap.exists) return false;
   const data = presenceSnap.data() || {};
@@ -312,8 +299,12 @@ exports.cleanupInactiveGroups = functions.pubsub
       const messagesSnap = await groupRef.collection('messages').get();
       messagesSnap.forEach((msg) => writer.delete(msg.ref));
 
-      const liveMessagesSnap = await groupRef.collection('liveMessages').get();
-      liveMessagesSnap.forEach((msg) => writer.delete(msg.ref));
+      const livesSnap = await groupRef.collection('lives').get();
+      for (const liveDoc of livesSnap.docs) {
+        const liveMessagesSnap = await liveDoc.ref.collection('messages').get();
+        liveMessagesSnap.forEach((msg) => writer.delete(msg.ref));
+        writer.delete(liveDoc.ref);
+      }
 
       const threadsSnap = await groupRef.collection('privateThreads').get();
       for (const threadDoc of threadsSnap.docs) {
@@ -388,25 +379,41 @@ exports.startGroupLive = functions.https.onCall(async (data, context) => {
       : '');
 
   const groupRef = db.doc(`groupRooms/${groupId}`);
+  const liveRef = groupRef.collection('lives').doc(userId);
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(groupRef);
     if (!snap.exists) {
       throw new functions.https.HttpsError('not-found', 'group-not-found');
     }
-    const live = snap.data()?.live || {};
+    const liveSnap = await tx.get(liveRef);
+    const liveData = liveSnap.exists ? liveSnap.data() || {} : {};
+    const wasActive = !!liveData.active;
     const liveUpdate = {
       active: true,
       hostId: userId,
       hostName,
       hostPhoto,
+      creatorId: userId,
+      creatorName: hostName,
+      creatorPhoto: hostPhoto,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
-    if (!live.active || !live.startedAt) {
+    if (!wasActive) {
       liveUpdate.startedAt = admin.firestore.FieldValue.serverTimestamp();
     }
+    tx.set(liveRef, liveUpdate, { merge: true });
+
+    const currentLive = snap.data()?.live || {};
+    const currentCount =
+      typeof currentLive.count === 'number' ? currentLive.count : 0;
+    const nextCount = wasActive ? currentCount : currentCount + 1;
     tx.set(
       groupRef,
       {
-        live: liveUpdate,
+        live: {
+          active: nextCount > 0,
+          count: nextCount,
+        },
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
       { merge: true }
@@ -427,35 +434,50 @@ exports.stopGroupLive = functions.https.onCall(async (data, context) => {
   const userId = context.auth.uid;
 
   const groupRef = db.doc(`groupRooms/${groupId}`);
-  const snap = await groupRef.get();
-  if (!snap.exists) {
-    throw new functions.https.HttpsError('not-found', 'group-not-found');
-  }
-  const live = snap.data()?.live;
-  if (!live?.active) {
-    throw new functions.https.HttpsError('failed-precondition', 'live-not-active');
-  }
+  const liveRef = groupRef.collection('lives').doc(userId);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(groupRef);
+    if (!snap.exists) {
+      throw new functions.https.HttpsError('not-found', 'group-not-found');
+    }
+    const liveSnap = await tx.get(liveRef);
+    if (!liveSnap.exists || !liveSnap.data()?.active) {
+      throw new functions.https.HttpsError(
+        'failed-precondition',
+        'live-not-active'
+      );
+    }
+    const liveData = liveSnap.data() || {};
+    if (liveData.hostId && liveData.hostId !== userId) {
+      throw new functions.https.HttpsError('permission-denied', 'not-live-host');
+    }
 
-  const isHost = await hasActiveLiveHostPresence(groupId, userId);
-  if (!isHost) {
-    throw new functions.https.HttpsError('permission-denied', 'not-live-host');
-  }
-
-  const otherHosts = await getActiveLiveHosts(groupRef, userId);
-  if (otherHosts.length > 0) {
-    return { ok: true };
-  }
-
-  await groupRef.set(
-    {
-      live: {
+    tx.set(
+      liveRef,
+      {
         active: false,
         endedAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       },
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
+      { merge: true }
+    );
+
+    const currentLive = snap.data()?.live || {};
+    const currentCount =
+      typeof currentLive.count === 'number' ? currentLive.count : 0;
+    const nextCount = Math.max(0, currentCount - 1);
+    tx.set(
+      groupRef,
+      {
+        live: {
+          active: nextCount > 0,
+          count: nextCount,
+        },
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
 
   return { ok: true };
 });
@@ -466,6 +488,7 @@ exports.getGroupLiveToken = functions.https.onCall(async (data, context) => {
   }
   const groupId = data?.groupId;
   const role = data?.role === 'host' ? 'host' : 'viewer';
+  const hostId = typeof data?.hostId === 'string' ? data.hostId : '';
   if (!groupId || typeof groupId !== 'string') {
     throw new functions.https.HttpsError('invalid-argument', 'missing-group-id');
   }
@@ -475,33 +498,61 @@ exports.getGroupLiveToken = functions.https.onCall(async (data, context) => {
   if (!allowed) {
     throw new functions.https.HttpsError('permission-denied', 'not-in-group');
   }
+  const targetHostId = role === 'host' ? userId : hostId;
+  if (!targetHostId) {
+    throw new functions.https.HttpsError('invalid-argument', 'missing-host-id');
+  }
+  if (role === 'host' && targetHostId !== userId) {
+    throw new functions.https.HttpsError('permission-denied', 'not-live-host');
+  }
 
   const groupRef = db.doc(`groupRooms/${groupId}`);
   const groupSnap = await groupRef.get();
   if (!groupSnap.exists) {
     throw new functions.https.HttpsError('not-found', 'group-not-found');
   }
-  const live = groupSnap.data()?.live;
-  if (!live?.active) {
+  const liveRef = groupRef.collection('lives').doc(targetHostId);
+  const liveSnap = await liveRef.get();
+  if (!liveSnap.exists || !liveSnap.data()?.active) {
     throw new functions.https.HttpsError('failed-precondition', 'live-not-active');
   }
-  if (role === 'viewer') {
-    const activeHosts = await getActiveLiveHosts(groupRef);
-    if (activeHosts.length === 0) {
-      await db
-        .doc(`groupRooms/${groupId}`)
-        .set(
-          {
-            live: {
-              active: false,
-              endedAt: admin.firestore.FieldValue.serverTimestamp(),
-              endedReason: 'stale',
-            },
+  const live = liveSnap.data() || {};
+  const hostActive = await isLiveHostActive(groupId, targetHostId);
+  const startedMs = toMillis(live.startedAt);
+  const isFresh = startedMs ? Date.now() - startedMs <= PRESENCE_ACTIVE_MS : false;
+  if (!hostActive && !isFresh) {
+    await db.runTransaction(async (tx) => {
+      const groupSnapTx = await tx.get(groupRef);
+      if (!groupSnapTx.exists) return;
+      const liveSnapTx = await tx.get(liveRef);
+      if (!liveSnapTx.exists || !liveSnapTx.data()?.active) return;
+
+      tx.set(
+        liveRef,
+        {
+          active: false,
+          endedAt: admin.firestore.FieldValue.serverTimestamp(),
+          endedReason: 'stale',
+        },
+        { merge: true }
+      );
+
+      const currentLive = groupSnapTx.data()?.live || {};
+      const currentCount =
+        typeof currentLive.count === 'number' ? currentLive.count : 0;
+      const nextCount = Math.max(0, currentCount - 1);
+      tx.set(
+        groupRef,
+        {
+          live: {
+            active: nextCount > 0,
+            count: nextCount,
           },
-          { merge: true }
-        );
-      throw new functions.https.HttpsError('failed-precondition', 'live-not-active');
-    }
+        },
+        { merge: true }
+      );
+    });
+    throw new functions.https.HttpsError('failed-precondition', 'live-not-active');
   }
 
   const profile = await getProfileSnapshot(userId);
@@ -523,9 +574,10 @@ exports.getGroupLiveToken = functions.https.onCall(async (data, context) => {
     identity: userId,
     name: identityName,
   });
+  const roomId = `${groupId}-${targetHostId}`;
   token.addGrant({
     roomJoin: true,
-    room: groupId,
+    room: roomId,
     canPublish: role === 'host',
     canSubscribe: true,
   });
@@ -569,13 +621,18 @@ exports.cleanupStaleLives = functions.pubsub
       const data = docSnap.data() || {};
       const live = data.live || {};
       if (!live.active) continue;
-      const activeHosts = await getActiveLiveHosts(docSnap.ref);
-      if (activeHosts.length === 0) {
+
+      const livesSnap = await docSnap.ref
+        .collection('lives')
+        .where('active', '==', true)
+        .get();
+      if (livesSnap.empty) {
         updates.push(
           docSnap.ref.set(
             {
               live: {
                 active: false,
+                count: 0,
                 endedAt: admin.firestore.FieldValue.serverTimestamp(),
                 endedReason: 'stale',
               },
@@ -583,7 +640,45 @@ exports.cleanupStaleLives = functions.pubsub
             { merge: true }
           )
         );
+        continue;
       }
+
+      let activeCount = 0;
+      for (const liveDoc of livesSnap.docs) {
+        const liveData = liveDoc.data() || {};
+        const hostId = liveData.hostId || liveDoc.id;
+        const hostActive = await isLiveHostActive(docSnap.id, hostId);
+        const startedMs = toMillis(liveData.startedAt);
+        const isFresh = startedMs
+          ? Date.now() - startedMs <= PRESENCE_ACTIVE_MS
+          : false;
+        if (!hostActive && !isFresh) {
+          updates.push(
+            liveDoc.ref.set(
+              {
+                active: false,
+                endedAt: admin.firestore.FieldValue.serverTimestamp(),
+                endedReason: 'stale',
+              },
+              { merge: true }
+            )
+          );
+          continue;
+        }
+        activeCount += 1;
+      }
+
+      updates.push(
+        docSnap.ref.set(
+          {
+            live: {
+              active: activeCount > 0,
+              count: activeCount,
+            },
+          },
+          { merge: true }
+        )
+      );
     }
 
     await Promise.all(updates);
